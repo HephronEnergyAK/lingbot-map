@@ -1,4 +1,7 @@
 __pycache__/
+.tools/
+.venv/
+.cache/
 *.pyc
 *.pyo
 *.egg-info/
@@ -16,4 +19,8 @@ weights/
 .DS_Store
 **/.DS_Store
 docs/
+!docs/
+docs/*
+!docs/agents/
+!docs/agents/*.md
 
