@@ -19,6 +19,7 @@ from blender_extension.job_lifecycle import (
     CONFIDENCE_CUTOFF_PROPERTY,
     POINT_BUDGET_PROPERTY,
     PROFILE_PROPERTY,
+    RETAIN_DENSE_PROPERTY,
 )
 
 
@@ -31,12 +32,16 @@ try:
     assert getattr(scene, POINT_BUDGET_PROPERTY) == 5_000_000
     setattr(scene, CONFIDENCE_CUTOFF_PROPERTY, 49.0)
     assert getattr(scene, PROFILE_PROPERTY) == "Custom"
+    setattr(scene, PROFILE_PROPERTY, "Draft")
+    setattr(scene, RETAIN_DENSE_PROPERTY, True)
+    assert getattr(scene, PROFILE_PROPERTY) == "Custom"
     operator = getattr(bpy.ops.lingbot_map, "run_reconstruction_job", None)
     assert operator is not None
     print(json.dumps({
         "blender": list(bpy.app.version),
         "balanced_defaults": [4, 50.0, 5_000_000],
         "edited_profile": "Custom",
+        "dense_retention_profile": "Custom",
         "operator_registered": True,
     }, sort_keys=True))
 finally:

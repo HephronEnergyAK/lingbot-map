@@ -40,6 +40,7 @@ def result_provenance(
     torch_intraop_threads: int = 1,
     torch_interop_threads: int = 1,
     fixture: bool = False,
+    retain_dense_predictions: bool = False,
 ) -> dict[str, Any]:
     profile = {
         "name": profile_name,
@@ -47,6 +48,7 @@ def result_provenance(
         "confidence_cutoff_percent": float(confidence_cutoff_percent),
         "depth_cutoff_percent": float(depth_cutoff_percent),
         "import_point_budget": int(import_point_budget),
+        "retain_dense_predictions": bool(retain_dense_predictions),
     }
     logical_processors = max(1, int(os.cpu_count() or 1))
     global_budget = max(1, min(8, logical_processors - 2))

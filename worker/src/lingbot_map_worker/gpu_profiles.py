@@ -78,6 +78,7 @@ class ProfileSelection:
     depth_cutoff_percent: float
     import_point_budget: int
     point_budget_confirmed: bool = False
+    retain_dense_predictions: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,8 +111,12 @@ def resolve_profile(selection: ProfileSelection) -> ReconstructionProfile | Prof
         raise ValueError("Import Point Budget must be in [1,50000000]")
     if budget > 10_000_000 and not selection.point_budget_confirmed:
         raise ValueError("Import Point Budget above 10000000 requires explicit confirmation")
+    if not isinstance(selection.retain_dense_predictions, bool):
+        raise ValueError("Dense Predictions retention must be boolean")
     for profile in PROFILES:
         if (
+            not selection.retain_dense_predictions
+            and
             selection.camera_iterations == profile.camera_iterations
             and float(selection.confidence_cutoff_percent) == profile.confidence_cutoff_percent
             and float(selection.depth_cutoff_percent) == profile.depth_cutoff_percent
@@ -125,6 +130,7 @@ def resolve_profile(selection: ProfileSelection) -> ReconstructionProfile | Prof
         float(selection.depth_cutoff_percent),
         budget,
         selection.point_budget_confirmed,
+        selection.retain_dense_predictions,
     )
 
 

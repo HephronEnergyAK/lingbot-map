@@ -234,14 +234,17 @@ def validate_job_spec(value: Any) -> dict[str, Any]:
             raise IpcError("Reconstruction preflight color is invalid")
         if not isinstance(preflight["variable_frame_rate"], bool):
             raise IpcError("Reconstruction preflight VFR flag is invalid")
-        profile = require_exact_object(
-            reconstruction["profile"],
-            {
+        profile = reconstruction["profile"]
+        profile_fields = {
                 "name", "camera_iterations", "confidence_cutoff_percent",
                 "depth_cutoff_percent", "import_point_budget", "point_budget_confirmed",
-            },
-            label="reconstruction.profile",
-        )
+            }
+        if (
+            not isinstance(profile, dict)
+            or not profile_fields.issubset(profile)
+            or not set(profile).issubset(profile_fields | {"retain_dense_predictions"})
+        ):
+            raise IpcError("reconstruction.profile has unknown or missing fields")
         require_text(profile["name"], label="profile.name", maximum=128)
         _integer(profile["camera_iterations"], "profile.camera_iterations", 1, 16)
         _finite(profile["confidence_cutoff_percent"], "profile.confidence_cutoff_percent", 0, 100)
@@ -249,6 +252,8 @@ def validate_job_spec(value: Any) -> dict[str, Any]:
         _integer(profile["import_point_budget"], "profile.import_point_budget", 1, 50_000_000)
         if not isinstance(profile["point_budget_confirmed"], bool):
             raise IpcError("profile.point_budget_confirmed is invalid")
+        if not isinstance(profile.get("retain_dense_predictions", False), bool):
+            raise IpcError("profile.retain_dense_predictions is invalid")
         if profile["import_point_budget"] > 10_000_000 and not profile["point_budget_confirmed"]:
             raise IpcError("Import Point Budget above ten million requires confirmation")
         gpu = require_exact_object(

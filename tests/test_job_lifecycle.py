@@ -167,12 +167,28 @@ class ProjectBindingTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         names = (
             "job-spec", "job-control", "job-event", "job-status",
-            "preflight-result", "reconstruction-result",
+            "preflight-result", "reconstruction-result", "dense-predictions",
         )
         for name in names:
             document = json.loads((root / "schemas" / f"{name}.schema.json").read_text(encoding="utf-8"))
             self.assertEqual(document["properties"]["schema_version"]["const"], "1.0.0")
             self.assertFalse(document["additionalProperties"])
+
+    def test_dense_setting_is_additive_to_existing_version_one_contracts(self):
+        root = Path(__file__).resolve().parents[1]
+        job = json.loads((root / "schemas" / "job-spec.schema.json").read_text(encoding="utf-8"))
+        result = json.loads(
+            (root / "schemas" / "reconstruction-result.schema.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn(
+            "retain_dense_predictions",
+            job["$defs"]["reconstruction"]["properties"]["profile"]["required"],
+        )
+        self.assertNotIn("retain_dense_predictions", result["properties"]["profile"]["required"])
+        self.assertNotIn(
+            "retain_dense_predictions",
+            result["$defs"]["provenance"]["properties"]["profile"]["required"],
+        )
 
     def test_schema_catalog_hashes_every_identical_bundled_contract(self):
         root = Path(__file__).resolve().parents[1]
@@ -384,6 +400,7 @@ class ProjectBindingTests(unittest.TestCase):
                     profile_name="Custom", camera_iterations=2,
                     confidence_cutoff_percent=42, depth_cutoff_percent=100,
                     import_point_budget=11_000_000, point_budget_confirmed=True,
+                    retain_dense_predictions=True,
                     gpu={
                         "uuid": "GPU-12345678", "name": "Ada", "total_memory": 24_000,
                         "driver_version": "999", "compute_capability": (8, 9),
@@ -401,6 +418,7 @@ class ProjectBindingTests(unittest.TestCase):
             self.assertEqual(reconstruction["preflight"]["frame_count"], 321)
             self.assertEqual(reconstruction["profile"]["name"], "Custom")
             self.assertTrue(reconstruction["profile"]["point_budget_confirmed"])
+            self.assertTrue(reconstruction["profile"]["retain_dense_predictions"])
             self.assertEqual(reconstruction["source"]["sha256"], source_hash)
             self.assertEqual(captured["command"][4], "--reconstruction-job")
             self.assertEqual(captured["env"]["CUDA_VISIBLE_DEVICES"], "GPU-12345678")
@@ -446,6 +464,29 @@ class ProjectBindingTests(unittest.TestCase):
             )
             self.assertEqual(len(ready), 1)
             self.assertEqual((ready[0].point_count, ready[0].frame_count), (5, 2))
+            self.assertEqual(ready[0].dense_status, "not-retained")
+            dense_manifest = directory / "dense" / "manifest.json"
+            dense_manifest.parent.mkdir()
+            atomic_write_json(
+                dense_manifest,
+                {
+                    "schema_version": "1.0.0",
+                    "component": "dense_predictions",
+                    "completion_state": "complete",
+                },
+            )
+            manifest["profile"]["retain_dense_predictions"] = True
+            manifest["dense_predictions"] = {
+                "schema_version": "1.0.0",
+                "completion_state": "complete",
+                "manifest_path": "dense/manifest.json",
+                "manifest_byte_length": dense_manifest.stat().st_size,
+                "manifest_sha256": hashlib.sha256(dense_manifest.read_bytes()).hexdigest(),
+            }
+            atomic_write_json(directory / "manifest.json", manifest)
+            self.assertEqual(discover_ready_results(blend)[0].dense_status, "available")
+            dense_manifest.unlink()
+            self.assertEqual(discover_ready_results(blend)[0].dense_status, "unavailable")
             self.assertEqual(
                 discover_ready_results(blend, scene_uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
                 (),

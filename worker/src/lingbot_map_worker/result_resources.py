@@ -133,3 +133,11 @@ def estimate_fixture_memory_bytes(frame_count: int, grid_pixels: int, point_budg
     per_reducer_entry = 256 * (point_budget + 1)
     output_arrays = 27 * point_budget
     return fixed + per_frame_metadata + per_grid_candidate + per_reducer_entry + output_arrays
+
+
+def estimate_dense_buffer_bytes(frame_count: int, grid_pixels: int) -> int:
+    """Maximum paired depth/confidence chunk held before a 64-frame flush."""
+
+    if frame_count < 1 or grid_pixels < 1:
+        raise ResourceGateError("dense buffer dimensions must be positive")
+    return min(frame_count, 64) * grid_pixels * 4 * 2

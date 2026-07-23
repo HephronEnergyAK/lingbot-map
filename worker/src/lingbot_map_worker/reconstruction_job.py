@@ -53,6 +53,7 @@ from .result_pipeline import (
 from .result_resources import (
     SystemResourceProbe,
     estimate_fixture_memory_bytes,
+    estimate_dense_buffer_bytes,
     require_project_disk,
     require_worker_memory,
 )
@@ -102,6 +103,7 @@ def _selected_profile(raw: dict[str, Any]) -> tuple[Any, ReconstructionProfile]:
         float(raw["depth_cutoff_percent"]),
         int(raw["import_point_budget"]),
         bool(raw["point_budget_confirmed"]),
+        bool(raw.get("retain_dense_predictions", False)),
     )
     resolved = resolve_profile(selection)
     if resolved.name != raw["name"]:
@@ -152,6 +154,7 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
         raise ReconstructionJobError("Reconstruction Model escaped the plain managed store")
     _require_plain_managed_path(model_path, managed_root)
     resolved_profile, execution_profile = _selected_profile(reconstruction["profile"])
+    retain_dense = bool(reconstruction["profile"].get("retain_dense_predictions", False))
     plan = inference_plan(int(preflight["frame_count"]))
     capability_profile = PROFILE_BY_NAME[gpu_raw["capability_profile_name"]]
     if (
@@ -207,6 +210,8 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
         estimated_memory = estimate_fixture_memory_bytes(
             total_frames, grid_pixels, execution_profile.import_point_budget
         )
+        if retain_dense:
+            estimated_memory += estimate_dense_buffer_bytes(total_frames, grid_pixels)
         require_worker_memory(probe, estimated_memory)
         source_document = {
             "absolute_path": source_raw["absolute_path"],
@@ -263,7 +268,7 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
             require_project_disk(
                 probe,
                 Path(job["project_root"]),
-                max(1, execution_profile.import_point_budget * 27),
+                sink.estimated_remaining_bytes,
             )
 
         def cuda_check() -> None:
@@ -315,6 +320,7 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
                 confidence_cutoff_percent=resolved_profile.confidence_cutoff_percent,
                 depth_cutoff_percent=resolved_profile.depth_cutoff_percent,
                 import_point_budget=resolved_profile.import_point_budget,
+                retain_dense_predictions=retain_dense,
                 plan=plan,
                 gpu={
                     "uuid": gpu.uuid,
@@ -348,10 +354,12 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
                     float(resolved_profile.depth_cutoff_percent),
                     int(resolved_profile.import_point_budget),
                     float(reconstruction["initial_voxel_edge_length"]),
+                    retain_dense,
                 ),
                 provenance={},
                 warnings=warnings,
                 created_utc=datetime.now(timezone.utc).isoformat(),
+                model_grid_shape=(canonical_height, canonical_width),
             ),
             prediction_decoder=TorchPredictionDecoder(),
             resource_probe=probe,
@@ -397,6 +405,7 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
                     float(resolved_profile.depth_cutoff_percent),
                     int(resolved_profile.import_point_budget),
                     True,
+                    retain_dense,
                 ),
                 result_sink=sink,
                 progress=progress,
@@ -420,6 +429,14 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
             gate.cache.invalidate_matching(identity, classification)
         error = f"{type(exc).__name__}: {exc}"[:16384]
     finally:
+        if "sink" in locals() and state != "succeeded":
+            try:
+                sink.abort(state)
+            except Exception as dense_abort_error:
+                if error is None:
+                    error = (
+                        f"{type(dense_abort_error).__name__}: {dense_abort_error}"
+                    )[:16384]
         stop.set()
         if heartbeat.is_alive():
             heartbeat.join(timeout=6)

@@ -36,6 +36,7 @@ from .job_lifecycle import (
     POINT_BUDGET_CONFIRMED_PROPERTY,
     POINT_BUDGET_PROPERTY,
     PROFILE_PROPERTY,
+    RETAIN_DENSE_PROPERTY,
     cancel_active_job,
     capture_source_draft_path,
     ensure_unique_scene_uuid,
@@ -439,6 +440,7 @@ class LINGBOTMAP_OT_run_reconstruction_job(bpy.types.Operator):
                 depth_cutoff_percent=float(getattr(scene, DEPTH_CUTOFF_PROPERTY)),
                 import_point_budget=int(getattr(scene, POINT_BUDGET_PROPERTY)),
                 point_budget_confirmed=bool(getattr(scene, POINT_BUDGET_CONFIRMED_PROPERTY)),
+                retain_dense_predictions=bool(getattr(scene, RETAIN_DENSE_PROPERTY)),
                 gpu=asdict(selected_gpu),
                 capability_profile_name=capability_name,
                 capability_profile_settings_sha256=_capability_settings_sha256(capability_name),
@@ -602,6 +604,7 @@ class LINGBOTMAP_PT_reconstruct(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         box.prop(context.scene, CONFIDENCE_CUTOFF_PROPERTY, text="Confidence Cutoff %")
         box.prop(context.scene, DEPTH_CUTOFF_PROPERTY, text="Depth Cutoff %")
         box.prop(context.scene, POINT_BUDGET_PROPERTY, text="Import Point Budget")
+        box.prop(context.scene, RETAIN_DENSE_PROPERTY, text="Retain Dense Predictions")
         if int(getattr(context.scene, POINT_BUDGET_PROPERTY)) > 10_000_000:
             box.prop(context.scene, POINT_BUDGET_CONFIRMED_PROPERTY, text="Confirm >10M Budget")
         run = layout.row()
@@ -648,6 +651,12 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
             box.label(text="Ready", icon="CHECKMARK")
             box.label(text=f"{result.profile_name}: {result.point_count:,} points")
             box.label(text=f"{result.frame_count:,} frames · {result.result_id}")
+            if result.dense_status == "available":
+                box.label(text="Dense Predictions: available", icon="CHECKMARK")
+            elif result.dense_status == "incompatible":
+                box.label(text="Dense Predictions: incompatible version", icon="ERROR")
+            elif result.dense_status == "unavailable":
+                box.label(text="Dense Predictions: unavailable; core Result remains usable", icon="ERROR")
 
 
 class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):

@@ -33,8 +33,16 @@ if np is not None:
         validate_npy_file,
         validate_result_bundle,
     )
+    from lingbot_map_worker.dense_predictions import (
+        DensePredictionWriter,
+        DensePredictionsError,
+        DensePredictionsIncompatible,
+        validate_dense_component,
+    )
     from lingbot_map_worker.result_pipeline import (
         AlignedPrediction,
+        IncrementalBundleResultSink,
+        IncrementalResultRequest,
         ResultBuildRequest,
         ResultProfile,
         build_reconstruction_result,
@@ -351,6 +359,192 @@ class SafeBundleTests(unittest.TestCase):
             self.assertEqual(result_renames[0][0].parent, result_renames[0][1].parent)
             self.assertTrue(outcome.published.directory.is_dir())
             self.assertEqual(list((fixture.project / "diagnostics").iterdir()), [])
+
+
+@unittest.skipIf(np is None, "Worker NumPy stack is not installed")
+class DensePredictionTests(unittest.TestCase):
+    def _provenance(self, source_sha: str, *, retained: bool = True):
+        return result_provenance(
+            runtime_id="2" * 64,
+            worker_version="0.1.0",
+            job_spec_sha256="3" * 64,
+            model_id="fixture-model",
+            model_sha256="4" * 64,
+            source_sha256=source_sha,
+            profile_name="Custom" if retained else "Draft",
+            camera_iterations=1,
+            confidence_cutoff_percent=70,
+            depth_cutoff_percent=99.5,
+            import_point_budget=8,
+            plan=None,
+            gpu=None,
+            suspension_count=0,
+            suspension_seconds=0,
+            fixture=True,
+            retain_dense_predictions=retained,
+        )
+
+    def _dense_result(
+        self, root: Path, frame_count: int = 65, *, cancel_on_finish: bool = False
+    ):
+        project = root / "target.lingbot-map"
+        (project / "results").mkdir(parents=True)
+        (project / "diagnostics").mkdir()
+        blend = root / "target.blend"
+        blend.touch()
+        source = root / "capture.mp4"
+        source.write_bytes(b"dense-fixture")
+        source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+        request = IncrementalResultRequest(
+            job_id="job-" + "d" * 32,
+            project_root=project,
+            target_scene={
+                "blend_path": str(blend),
+                "scene_uuid": "12345678-1234-1234-1234-123456789abc",
+                "scene_name": "Scene",
+            },
+            timeline_start=1,
+            source={
+                "absolute_path": str(source),
+                "scene_relative_path": "//capture.mp4",
+                "size_bytes": source.stat().st_size,
+                "modification_time_ns": source.stat().st_mtime_ns,
+                "sha256": source_sha,
+            },
+            source_to_model=np.eye(3, dtype="<f8"),
+            frame_count=frame_count,
+            profile=ResultProfile("Custom", 70, 99.5, 8, 0.01, True),
+            provenance=self._provenance(source_sha),
+            created_utc="2026-07-23T06:00:00+00:00",
+            result_id="result-" + "e" * 32,
+            model_grid_shape=(2, 2),
+        )
+        sink = IncrementalBundleResultSink(
+            request,
+            prediction_decoder=lambda prediction, _canonical, _pts: prediction,
+            resource_probe=FixedResourceProbe(20 * 1024**3, 20 * 1024**3),
+            cancel=lambda: cancel_on_finish and sink.finalized_frame_count == frame_count,
+        )
+        for index in range(frame_count):
+            sink.accept(_prediction(index), None, index * 0.04)
+        return sink.finish(), project
+
+    def test_writer_uses_exact_64_frame_boundaries_and_separate_float32_signals(self):
+        for frame_count, expected in ((64, [64]), (65, [64, 1]), (128, [64, 64])):
+            with self.subTest(frame_count=frame_count), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                project = root / "target.lingbot-map"
+                (project / "results").mkdir(parents=True)
+                (project / "diagnostics").mkdir()
+                writer = DensePredictionWriter(
+                    project_root=project,
+                    job_id="job-" + "a" * 32,
+                    frame_count=frame_count,
+                    grid_shape=(2, 3),
+                    disk_check=lambda _remaining: None,
+                )
+                for index in range(frame_count):
+                    writer.accept(
+                        index,
+                        np.full((2, 3), index + 1, dtype="<f4"),
+                        np.full((2, 3), index + 2, dtype="<f4"),
+                    )
+                    self.assertLessEqual(writer.buffered_frames, 63)
+                artifact = writer.finish(self._provenance("5" * 64))
+                manifest = json.loads(
+                    (artifact.staging_directory / "manifest.json").read_text(encoding="utf-8")
+                )
+                for name in ("depth", "depth_confidence"):
+                    chunks = manifest["signals"][name]["chunks"]
+                    self.assertEqual([chunk["frame_count"] for chunk in chunks], expected)
+                    self.assertTrue(all(chunk["dtype"] == "<f4" for chunk in chunks))
+                    self.assertEqual(manifest["signals"][name]["shape"], [frame_count, 2, 3])
+
+    def test_core_validation_survives_missing_or_corrupt_dense_content(self):
+        for mutation in ("missing-manifest", "corrupt-chunk"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                outcome, _project = self._dense_result(Path(temporary))
+                result = outcome.published.directory
+                descriptor = outcome.published.manifest["dense_predictions"]
+                validate_dense_component(result, descriptor)
+                if mutation == "missing-manifest":
+                    (result / "dense" / "manifest.json").unlink()
+                else:
+                    chunk = next((result / "dense" / "depth").glob("*.npy"))
+                    with chunk.open("ab") as stream:
+                        stream.write(b"corrupt")
+                validate_result_bundle(result)
+                with self.assertRaises(DensePredictionsError):
+                    validate_dense_component(result, descriptor)
+
+    def test_dense_schema_compatibility_is_independent_from_core_result(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            outcome, _project = self._dense_result(Path(temporary), frame_count=8)
+            result = outcome.published.directory
+            manifest_path = result / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["dense_predictions"]["schema_version"] = "2.0.0"
+            atomic_write_json(manifest_path, manifest)
+            validate_result_bundle(result)
+            with self.assertRaises(DensePredictionsIncompatible):
+                validate_dense_component(result, manifest["dense_predictions"])
+
+    def test_disk_exhaustion_and_cancellation_publish_no_partial_dense_component(self):
+        class ExhaustingProbe(FixedResourceProbe):
+            def __init__(self):
+                super().__init__(20 * 1024**3, 20 * 1024**3)
+                self.calls = 0
+            def available_disk_bytes(self, path):
+                self.calls += 1
+                # Constructor + 64 per-frame core checks pass; the first chunk write fails.
+                return super().available_disk_bytes(path) if self.calls <= 66 else 0
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "target.lingbot-map"
+            (project / "results").mkdir(parents=True)
+            (project / "diagnostics").mkdir()
+            blend = root / "target.blend"
+            blend.touch()
+            source = root / "capture.mp4"
+            source.write_bytes(b"disk-fixture")
+            source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+            request = IncrementalResultRequest(
+                job_id="job-" + "f" * 32,
+                project_root=project,
+                target_scene={"blend_path": str(blend), "scene_uuid": "12345678-1234-1234-1234-123456789abc", "scene_name": "Scene"},
+                timeline_start=1,
+                source={"absolute_path": str(source), "scene_relative_path": "//capture.mp4", "size_bytes": source.stat().st_size, "modification_time_ns": source.stat().st_mtime_ns, "sha256": source_sha},
+                source_to_model=np.eye(3, dtype="<f8"),
+                frame_count=64,
+                profile=ResultProfile("Custom", 70, 99.5, 8, 0.01, True),
+                provenance=self._provenance(source_sha),
+                model_grid_shape=(2, 2),
+            )
+            sink = IncrementalBundleResultSink(
+                request,
+                prediction_decoder=lambda prediction, _canonical, _pts: prediction,
+                resource_probe=ExhaustingProbe(),
+                cancel=lambda: False,
+            )
+            with self.assertRaises(ResourceGateError):
+                for index in range(64):
+                    sink.accept(_prediction(index), None, index * 0.04)
+            diagnostic = sink.abort("failed")
+            self.assertIsNotNone(diagnostic)
+            self.assertFalse(any((project / "results").iterdir()))
+            self.assertEqual(
+                json.loads((diagnostic / "incomplete.json").read_text(encoding="utf-8"))["completion_state"],
+                "incomplete",
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(ResultCancelled):
+                self._dense_result(root, frame_count=8, cancel_on_finish=True)
+            project = root / "target.lingbot-map"
+            self.assertFalse(any((project / "results").iterdir()))
+            self.assertTrue(any((project / "diagnostics").iterdir()))
 
 
 if __name__ == "__main__":

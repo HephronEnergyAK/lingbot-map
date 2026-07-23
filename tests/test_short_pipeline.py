@@ -153,6 +153,10 @@ class ProfileAndPreprocessingTests(unittest.TestCase):
             self.assertEqual(resolve_profile(selected).name, profile.name)
         changed = ProfileSelection("High", 4, 29, 99.5, 10_000_000)
         self.assertEqual(resolve_profile(changed).name, "Custom")
+        retained = ProfileSelection(
+            "High", 4, 30, 99.5, 10_000_000, False, True
+        )
+        self.assertEqual(resolve_profile(retained).name, "Custom")
         with self.assertRaisesRegex(ValueError, "confirmation"):
             resolve_profile(ProfileSelection("Custom", 4, 50, 99.5, 10_000_001))
         self.assertEqual(

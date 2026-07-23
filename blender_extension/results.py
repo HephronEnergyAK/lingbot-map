@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
@@ -32,6 +33,7 @@ class ReadyResult:
     point_count: int
     frame_count: int
     profile_name: str
+    dense_status: str = "not-retained"
 
 
 def _ordinary_relative_file(root: Path, value: Any) -> Path:
@@ -58,6 +60,62 @@ def _ordinary_relative_file(root: Path, value: Any) -> Path:
     return path
 
 
+def _dense_status(directory: Path, raw: Any) -> str:
+    if raw is None:
+        return "not-retained"
+    try:
+        descriptor = require_exact_object(
+            raw,
+            {
+                "schema_version", "completion_state", "manifest_path",
+                "manifest_byte_length", "manifest_sha256",
+            },
+            label="Dense Predictions descriptor",
+        )
+        version = require_text(
+            descriptor["schema_version"], label="Dense Predictions schema", maximum=64
+        )
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+            return "unavailable"
+        if version != "1.0.0":
+            return "incompatible"
+        if (
+            descriptor["completion_state"] != "complete"
+            or descriptor["manifest_path"] != "dense/manifest.json"
+            or isinstance(descriptor["manifest_byte_length"], bool)
+            or not isinstance(descriptor["manifest_byte_length"], int)
+            or not 1 <= descriptor["manifest_byte_length"] <= 16 * 1024 * 1024
+            or not re.fullmatch(r"[0-9a-f]{64}", str(descriptor["manifest_sha256"]))
+        ):
+            return "unavailable"
+        path = _ordinary_relative_file(directory, descriptor["manifest_path"])
+        before = path.stat()
+        if before.st_size != descriptor["manifest_byte_length"]:
+            return "unavailable"
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        after = path.stat()
+        if (
+            before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or digest.hexdigest() != descriptor["manifest_sha256"]
+        ):
+            return "unavailable"
+        manifest = read_json(path)
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("schema_version") != version
+            or manifest.get("component") != "dense_predictions"
+            or manifest.get("completion_state") != "complete"
+        ):
+            return "unavailable"
+        return "available"
+    except (IpcError, OSError, ValueError):
+        return "unavailable"
+
+
 def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> ReadyResult:
     directory = Path(os.path.abspath(directory))
     if (
@@ -68,15 +126,17 @@ def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> Read
     ):
         raise IpcError("Result directory is not an ordinary canonical publication")
     manifest = read_json(directory / "manifest.json")
-    require_exact_object(
-        manifest,
-        {
+    required_fields = {
             "schema_version", "result_id", "job_id", "created_utc", "target_scene",
             "timeline_start", "source", "contracts", "profile", "coordinate_system",
             "counts", "arrays", "confidence_statistics", "warnings", "provenance", "logs",
-        },
-        label="Result manifest",
-    )
+        }
+    if (
+        not isinstance(manifest, dict)
+        or not required_fields.issubset(manifest)
+        or not set(manifest).issubset(required_fields | {"dense_predictions"})
+    ):
+        raise IpcError("Result manifest has unknown or missing fields")
     if manifest["schema_version"] != RESULT_SCHEMA_VERSION:
         raise IpcError("Result schema version is unsupported")
     result_id = require_text(manifest["result_id"], label="result_id", maximum=64)
@@ -103,11 +163,16 @@ def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> Read
         if descriptor["path"] != f"arrays/{name}.npy":
             raise IpcError("Result array path is not canonical")
         _ordinary_relative_file(directory, descriptor["path"])
-    profile = require_exact_object(
-        manifest["profile"],
-        {"name", "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget"},
-        label="profile",
-    )
+    profile = manifest["profile"]
+    profile_fields = {
+        "name", "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget"
+    }
+    if (
+        not isinstance(profile, dict)
+        or not profile_fields.issubset(profile)
+        or not set(profile).issubset(profile_fields | {"retain_dense_predictions"})
+    ):
+        raise IpcError("Result profile has unknown or missing fields")
     if not isinstance(manifest["logs"], list):
         raise IpcError("Result logs must be an array")
     for log in manifest["logs"]:
@@ -121,6 +186,7 @@ def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> Read
         counts["points"],
         counts["frames"],
         require_text(profile["name"], label="profile.name", maximum=128),
+        _dense_status(directory, manifest.get("dense_predictions")),
     )
 
 

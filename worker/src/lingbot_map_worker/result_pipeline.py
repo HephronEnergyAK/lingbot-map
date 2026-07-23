@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
+from .dense_predictions import DensePredictionWriter, estimate_dense_prediction_bytes
 from .point_reducer import PointCandidate, PointReducer
 from .result_bundle import (
     PublishedResult,
@@ -20,6 +21,7 @@ from .result_resources import (
     ResourceProbe,
     estimate_core_result_bytes,
     estimate_fixture_memory_bytes,
+    estimate_dense_buffer_bytes,
     require_project_disk,
     require_worker_memory,
 )
@@ -53,6 +55,7 @@ class ResultProfile:
     depth_cutoff_percent: float
     import_point_budget: int
     initial_voxel_edge_length: float
+    retain_dense_predictions: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,7 @@ class IncrementalResultRequest:
     warnings: tuple[Mapping[str, str], ...] = ()
     created_utc: str | None = None
     result_id: str | None = None
+    model_grid_shape: tuple[int, int] | None = None
 
 
 PredictionDecoder = Callable[[Any, Any, float], AlignedPrediction]
@@ -139,6 +143,8 @@ def _validate_profile(profile: ResultProfile) -> None:
     ):
         if isinstance(value, bool) or not math.isfinite(float(value)) or not 0 <= float(value) <= 100:
             raise ResultPipelineError(f"{label} must be in [0,100]")
+    if not isinstance(profile.retain_dense_predictions, bool):
+        raise ResultPipelineError("Dense Predictions retention must be boolean")
 
 
 def _validate_predictions(
@@ -352,6 +358,7 @@ def build_reconstruction_result(
         "confidence_cutoff_percent": float(request.profile.confidence_cutoff_percent),
         "depth_cutoff_percent": float(request.profile.depth_cutoff_percent),
         "import_point_budget": point_budget,
+        "retain_dense_predictions": request.profile.retain_dense_predictions,
     }
     publication = ResultPublication(
         job_id=request.job_id,
@@ -414,6 +421,35 @@ class IncrementalBundleResultSink:
         self.estimated_result = estimate_core_result_bytes(
             request.frame_count, request.profile.import_point_budget
         )
+        self.dense_writer: DensePredictionWriter | None = None
+        if request.profile.retain_dense_predictions:
+            if (
+                request.model_grid_shape is None
+                or len(request.model_grid_shape) != 2
+                or min(request.model_grid_shape) < 1
+            ):
+                raise ResultPipelineError(
+                    "Dense Predictions require the exact preflight model grid"
+                )
+            dense_estimate = estimate_dense_prediction_bytes(
+                request.frame_count, math.prod(request.model_grid_shape)
+            )
+            require_project_disk(
+                resource_probe,
+                request.project_root,
+                self.estimated_result + dense_estimate,
+            )
+            self.dense_writer = DensePredictionWriter(
+                project_root=request.project_root,
+                job_id=request.job_id,
+                frame_count=request.frame_count,
+                grid_shape=request.model_grid_shape,
+                disk_check=lambda remaining: require_project_disk(
+                    resource_probe,
+                    request.project_root,
+                    self.estimated_result + remaining,
+                ),
+            )
         self.reducer = PointReducer(
             request.profile.import_point_budget,
             initial_edge_length=request.profile.initial_voxel_edge_length,
@@ -430,6 +466,15 @@ class IncrementalBundleResultSink:
         self.model_shape: tuple[int, int] | None = None
         self._finished = False
         require_project_disk(resource_probe, request.project_root, self.estimated_result)
+
+    @property
+    def estimated_remaining_bytes(self) -> int:
+        dense = (
+            self.dense_writer.estimated_remaining_bytes
+            if self.dense_writer is not None
+            else 0
+        )
+        return self.estimated_result + dense
 
     @property
     def finalized_frame_count(self) -> int:
@@ -457,6 +502,10 @@ class IncrementalBundleResultSink:
             height * width,
             self.request.profile.import_point_budget,
         )
+        if self.dense_writer is not None:
+            estimated_memory += estimate_dense_buffer_bytes(
+                self.request.frame_count, height * width
+            )
         require_worker_memory(self.resource_probe, estimated_memory)
         require_project_disk(
             self.resource_probe, self.request.project_root, self.estimated_result
@@ -468,6 +517,8 @@ class IncrementalBundleResultSink:
             first_blender = opencv_c2w @ _BLENDER_FROM_OPENCV_CAMERA
             self.normalization = _FIRST_CAMERA_TARGET @ np.linalg.inv(first_blender)
         retained, statistics = _filter_frame(aligned, self.request.profile)
+        if self.dense_writer is not None:
+            self.dense_writer.accept(expected, aligned.depth, aligned.confidence)
         self.filters.append(statistics)
         rows, columns = np.nonzero(retained)
         if len(rows):
@@ -545,7 +596,18 @@ class IncrementalBundleResultSink:
             ),
             "depth_cutoff_percent": float(self.request.profile.depth_cutoff_percent),
             "import_point_budget": self.request.profile.import_point_budget,
+            "retain_dense_predictions": self.request.profile.retain_dense_predictions,
         }
+        provenance = (
+            self.provenance_factory()
+            if self.provenance_factory is not None
+            else self.request.provenance
+        )
+        dense_component = (
+            self.dense_writer.finish(provenance)
+            if self.dense_writer is not None
+            else None
+        )
         publication = ResultPublication(
             job_id=self.request.job_id,
             project_root=self.request.project_root,
@@ -553,17 +615,14 @@ class IncrementalBundleResultSink:
             timeline_start=self.request.timeline_start,
             source=self.request.source,
             profile=profile,
-            provenance=(
-                self.provenance_factory()
-                if self.provenance_factory is not None
-                else self.request.provenance
-            ),
+            provenance=provenance,
             warnings=self.request.warnings,
             arrays=arrays,
             voxel_edge_length=reduced.edge_length,
             voxel_origin=(0.0, 0.0, 0.0),
             created_utc=self.request.created_utc,
             result_id=self.request.result_id,
+            dense_component=dense_component,
         )
 
         def disk_check(remaining: int) -> None:
@@ -571,14 +630,23 @@ class IncrementalBundleResultSink:
                 self.resource_probe, self.request.project_root, remaining
             )
 
-        published = publish_result_bundle(
-            publication,
-            cancel=self.cancel,
-            disk_check=disk_check,
-            estimated_total_bytes=self.estimated_result,
-        )
+        try:
+            published = publish_result_bundle(
+                publication,
+                cancel=self.cancel,
+                disk_check=disk_check,
+                estimated_total_bytes=self.estimated_result,
+            )
+        except Exception:
+            self.abort("failed")
+            raise
         return ResultBuildOutcome(
             published,
             tuple(self.filters),
             self.reducer.maximum_occupied_entries,
         )
+
+    def abort(self, reason: str) -> Path | None:
+        if self.dense_writer is None:
+            return None
+        return self.dense_writer.abort(reason)

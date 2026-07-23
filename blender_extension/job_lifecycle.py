@@ -36,6 +36,7 @@ CONFIDENCE_CUTOFF_PROPERTY = "lingbot_map_confidence_cutoff_percent"
 DEPTH_CUTOFF_PROPERTY = "lingbot_map_depth_cutoff_percent"
 POINT_BUDGET_PROPERTY = "lingbot_map_import_point_budget"
 POINT_BUDGET_CONFIRMED_PROPERTY = "lingbot_map_point_budget_confirmed"
+RETAIN_DENSE_PROPERTY = "lingbot_map_retain_dense_predictions"
 JOB_ID = re.compile(r"job-[0-9a-f]{32}\Z")
 TERMINAL_STATES = {"succeeded", "cancelled", "failed"}
 MAX_ACTIVE_ENTRIES = 32
@@ -676,6 +677,7 @@ class JobController:
         depth_cutoff_percent: float,
         import_point_budget: int,
         point_budget_confirmed: bool,
+        retain_dense_predictions: bool,
         gpu: Mapping[str, Any],
         capability_profile_name: str,
         capability_profile_settings_sha256: str,
@@ -746,6 +748,7 @@ class JobController:
                     "depth_cutoff_percent": float(depth_cutoff_percent),
                     "import_point_budget": int(import_point_budget),
                     "point_budget_confirmed": bool(point_budget_confirmed),
+                    "retain_dense_predictions": bool(retain_dense_predictions),
                 },
                 "gpu": {
                     "uuid": gpu["uuid"],

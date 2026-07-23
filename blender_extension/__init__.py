@@ -23,6 +23,7 @@ from .job_lifecycle import (
     POINT_BUDGET_CONFIRMED_PROPERTY,
     POINT_BUDGET_PROPERTY,
     PROFILE_PROPERTY,
+    RETAIN_DENSE_PROPERTY,
     detach_job_monitor,
     recover_jobs_for_blend,
     report_job_recovery_error,
@@ -50,6 +51,7 @@ def _apply_named_profile(scene, _context) -> None:
         setattr(scene, DEPTH_CUTOFF_PROPERTY, depth)
         setattr(scene, POINT_BUDGET_PROPERTY, budget)
         setattr(scene, POINT_BUDGET_CONFIRMED_PROPERTY, False)
+        setattr(scene, RETAIN_DENSE_PROPERTY, False)
     finally:
         scene.pop(_PROFILE_GUARD, None)
 
@@ -127,6 +129,7 @@ def register() -> None:
             setattr(scene_type, DEPTH_CUTOFF_PROPERTY, FloatProperty(name="Depth Cutoff", default=99.5, min=0.0, max=100.0, update=_mark_profile_custom))
             setattr(scene_type, POINT_BUDGET_PROPERTY, IntProperty(name="Import Point Budget", default=1_000_000, min=1, max=50_000_000, update=_mark_profile_custom))
             setattr(scene_type, POINT_BUDGET_CONFIRMED_PROPERTY, BoolProperty(name="Confirm Large Budget", default=False, update=_mark_profile_custom))
+            setattr(scene_type, RETAIN_DENSE_PROPERTY, BoolProperty(name="Retain Dense Predictions", description="Retain finalized aligned depth and raw confidence in optional chunks", default=False, update=_mark_profile_custom))
         handlers = getattr(bpy.app, "handlers", None)
         timers = getattr(bpy.app, "timers", None)
         if handlers is not None and _recover_jobs_after_load not in handlers.load_post:
@@ -184,6 +187,7 @@ def _unregister_scene_property() -> None:
             DEPTH_CUTOFF_PROPERTY,
             POINT_BUDGET_PROPERTY,
             POINT_BUDGET_CONFIRMED_PROPERTY,
+            RETAIN_DENSE_PROPERTY,
         ):
             if hasattr(scene_type, name):
                 delattr(scene_type, name)

@@ -16,6 +16,11 @@ import uuid
 
 import numpy as np
 
+from .dense_predictions import (
+    DenseComponentArtifact,
+    validate_dense_component,
+    validate_dense_descriptor,
+)
 from .ipc import SCHEMA_VERSION, atomic_write_json, read_json, require_exact_object, require_text
 from .model_store_compat import is_reparse_point
 
@@ -65,6 +70,7 @@ class ResultPublication:
     voxel_origin: tuple[float, float, float]
     created_utc: str | None = None
     result_id: str | None = None
+    dense_component: DenseComponentArtifact | None = None
 
 
 CORE_ARRAY_DTYPES = {
@@ -325,13 +331,16 @@ def _validate_semantics(arrays: Mapping[str, np.ndarray]) -> tuple[int, int]:
     return count, frame_count
 
 
-def _walk_plain_files(root: Path) -> set[str]:
+def _walk_plain_files(root: Path, *, ignore_dense: bool = False) -> set[str]:
     found: set[str] = set()
     pending = [root]
     while pending:
         directory = pending.pop()
         with os.scandir(directory) as entries:
             for entry in entries:
+                if ignore_dense and directory == root and entry.name == "dense":
+                    # Dense is optional and untrusted. Core validation never follows it.
+                    continue
                 path = Path(entry.path)
                 if entry.is_symlink() or is_reparse_point(path):
                     raise ResultBundleError("Result contains linked or reparse content")
@@ -354,7 +363,12 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
         "timeline_start", "source", "contracts", "profile", "coordinate_system",
         "counts", "arrays", "confidence_statistics", "warnings", "provenance", "logs",
     }
-    require_exact_object(manifest, fields, label="Result manifest")
+    if (
+        not isinstance(manifest, dict)
+        or not fields.issubset(manifest)
+        or not set(manifest).issubset(fields | {"dense_predictions"})
+    ):
+        raise ResultBundleError("Result manifest has unknown or missing fields")
     if manifest["schema_version"] != RESULT_SCHEMA_VERSION:
         raise ResultBundleError("unsupported Reconstruction Result schema version")
     if not RESULT_ID.fullmatch(str(manifest["result_id"])) or not JOB_ID.fullmatch(str(manifest["job_id"])):
@@ -404,11 +418,16 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
         "result": RESULT_SCHEMA_VERSION,
     }:
         raise ResultBundleError("manifest names unsupported contract versions")
-    profile = require_exact_object(
-        manifest["profile"],
-        {"name", "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget"},
-        label="profile",
-    )
+    profile = manifest["profile"]
+    profile_fields = {
+        "name", "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget"
+    }
+    if (
+        not isinstance(profile, dict)
+        or not profile_fields.issubset(profile)
+        or not set(profile).issubset(profile_fields | {"retain_dense_predictions"})
+    ):
+        raise ResultBundleError("profile has unknown or missing fields")
     if (
         isinstance(profile["import_point_budget"], bool)
         or not isinstance(profile["import_point_budget"], int)
@@ -420,6 +439,17 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
         value = profile[name]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 100:
             raise ResultBundleError(f"profile {name} is invalid")
+    retained_dense = profile.get("retain_dense_predictions", False)
+    if not isinstance(retained_dense, bool):
+        raise ResultBundleError("profile Dense Predictions retention is invalid")
+    descriptor = None
+    if "dense_predictions" in manifest:
+        try:
+            descriptor = validate_dense_descriptor(manifest["dense_predictions"])
+        except Exception as exc:
+            raise ResultBundleError(f"Dense Predictions descriptor is invalid: {exc}") from exc
+    if retained_dense != (descriptor is not None):
+        raise ResultBundleError("profile and Dense Predictions descriptor disagree")
     coordinate = require_exact_object(
         manifest["coordinate_system"],
         {"name", "handedness", "camera_local_axes", "voxel_origin", "voxel_edge_length"},
@@ -555,14 +585,19 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
             isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in capability
         ):
             raise ResultBundleError("gpu.compute_capability is invalid")
-    profile_provenance = require_exact_object(
-        provenance["profile"],
-        {
-            "name", "settings_sha256", "camera_iterations",
-            "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget",
-        },
-        label="provenance profile",
-    )
+    profile_provenance = provenance["profile"]
+    profile_provenance_fields = {
+        "name", "settings_sha256", "camera_iterations",
+        "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget",
+    }
+    if (
+        not isinstance(profile_provenance, dict)
+        or not profile_provenance_fields.issubset(profile_provenance)
+        or not set(profile_provenance).issubset(
+            profile_provenance_fields | {"retain_dense_predictions"}
+        )
+    ):
+        raise ResultBundleError("provenance profile has unknown or missing fields")
     require_text(profile_provenance["name"], label="profile.name", maximum=128)
     if not SHA256.fullmatch(str(profile_provenance["settings_sha256"])):
         raise ResultBundleError("profile settings checksum is invalid")
@@ -573,6 +608,9 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
     ):
         if profile_provenance[name] != manifest["profile"][name]:
             raise ResultBundleError(f"profile provenance disagrees with Result field: {name}")
+    provenance_retained_dense = profile_provenance.get("retain_dense_predictions", False)
+    if not isinstance(provenance_retained_dense, bool) or provenance_retained_dense != retained_dense:
+        raise ResultBundleError("profile provenance Dense Predictions setting disagrees")
     preprocessing = require_exact_object(
         provenance["preprocessing"],
         {"image_size", "patch_size", "mode", "resize", "color", "normalization"},
@@ -647,7 +685,7 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
         if path.stat().st_size != descriptor["byte_length"] or _sha256_file(path) != descriptor["sha256"]:
             raise ResultBundleError("log descriptor length or checksum is invalid")
         declared.add(relative_log)
-    if _walk_plain_files(root) != declared:
+    if _walk_plain_files(root, ignore_dense=descriptor is not None) != declared:
         raise ResultBundleError("Result contains undeclared or missing files")
     return manifest
 
@@ -682,6 +720,25 @@ def publish_result_bundle(
     committed = False
     remaining = int(estimated_total_bytes)
     try:
+        dense_descriptor = None
+        if publication.dense_component is not None:
+            if cancel():
+                raise ResultCancelled("Result publication was cancelled before dense commit")
+            dense_source = Path(os.path.abspath(publication.dense_component.staging_directory))
+            if (
+                dense_source.parent != results_root
+                or not dense_source.name.startswith(".dense-staging-")
+                or not dense_source.is_dir()
+                or dense_source.is_symlink()
+                or is_reparse_point(dense_source)
+            ):
+                raise ResultBundleError("Dense Predictions staging path is invalid")
+            dense_destination = staging / "dense"
+            os.replace(dense_source, dense_destination)
+            dense_descriptor = validate_dense_descriptor(
+                publication.dense_component.descriptor
+            )
+            validate_dense_component(staging, dense_descriptor)
         descriptors: dict[str, dict[str, Any]] = {}
         for name in sorted(publication.arrays):
             if cancel():
@@ -739,11 +796,15 @@ def publish_result_bundle(
             "provenance": dict(publication.provenance),
             "logs": [log_descriptor],
         }
+        if dense_descriptor is not None:
+            manifest["dense_predictions"] = dense_descriptor
         if cancel():
             raise ResultCancelled("Result publication was cancelled before commit")
         disk_check(max(0, remaining))
         atomic_write_json(staging / "manifest.json", manifest)
         validate_result_bundle(staging)
+        if dense_descriptor is not None:
+            validate_dense_component(staging, dense_descriptor)
         if cancel():
             raise ResultCancelled("Result publication was cancelled before commit")
         os.replace(staging, final)
