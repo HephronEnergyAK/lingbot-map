@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import bpy
-from bpy.props import StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
 from .host import probe_supported_host
 from .runtime import (
@@ -17,6 +17,12 @@ from .ui import CLASSES
 from .gpu_capability import shutdown_gpu_capability
 from .job_lifecycle import (
     CAPTURE_SOURCE_PROPERTY,
+    CAMERA_ITERATIONS_PROPERTY,
+    CONFIDENCE_CUTOFF_PROPERTY,
+    DEPTH_CUTOFF_PROPERTY,
+    POINT_BUDGET_CONFIRMED_PROPERTY,
+    POINT_BUDGET_PROPERTY,
+    PROFILE_PROPERTY,
     detach_job_monitor,
     recover_jobs_for_blend,
     report_job_recovery_error,
@@ -24,6 +30,33 @@ from .job_lifecycle import (
 
 
 _registered_classes: list[type] = []
+_PROFILE_GUARD = "_lingbot_map_profile_update"
+_PROFILE_DEFAULTS = {
+    "Draft": (1, 70.0, 99.5, 1_000_000),
+    "Balanced": (4, 50.0, 99.5, 5_000_000),
+    "High": (4, 30.0, 99.5, 10_000_000),
+}
+
+
+def _apply_named_profile(scene, _context) -> None:
+    name = str(getattr(scene, PROFILE_PROPERTY, "Draft"))
+    if name not in _PROFILE_DEFAULTS:
+        return
+    scene[_PROFILE_GUARD] = True
+    try:
+        camera, confidence, depth, budget = _PROFILE_DEFAULTS[name]
+        setattr(scene, CAMERA_ITERATIONS_PROPERTY, camera)
+        setattr(scene, CONFIDENCE_CUTOFF_PROPERTY, confidence)
+        setattr(scene, DEPTH_CUTOFF_PROPERTY, depth)
+        setattr(scene, POINT_BUDGET_PROPERTY, budget)
+        setattr(scene, POINT_BUDGET_CONFIRMED_PROPERTY, False)
+    finally:
+        scene.pop(_PROFILE_GUARD, None)
+
+
+def _mark_profile_custom(scene, _context) -> None:
+    if not scene.get(_PROFILE_GUARD, False):
+        setattr(scene, PROFILE_PROPERTY, "Custom")
 
 
 def _persistent(function):
@@ -73,6 +106,27 @@ def register() -> None:
                     default="",
                 ),
             )
+        if scene_type is not None and not hasattr(scene_type, PROFILE_PROPERTY):
+            setattr(
+                scene_type,
+                PROFILE_PROPERTY,
+                EnumProperty(
+                    name="Reconstruction Profile",
+                    items=(
+                        ("Draft", "Draft", "70% confidence, 1 iteration, 1M points"),
+                        ("Balanced", "Balanced", "50% confidence, 4 iterations, 5M points"),
+                        ("High", "High", "30% confidence, 4 iterations, 10M points"),
+                        ("Custom", "Custom", "Explicit advanced settings"),
+                    ),
+                    default="Draft",
+                    update=_apply_named_profile,
+                ),
+            )
+            setattr(scene_type, CAMERA_ITERATIONS_PROPERTY, IntProperty(name="Camera Iterations", default=1, min=1, max=4, update=_mark_profile_custom))
+            setattr(scene_type, CONFIDENCE_CUTOFF_PROPERTY, FloatProperty(name="Confidence Cutoff", default=70.0, min=0.0, max=100.0, update=_mark_profile_custom))
+            setattr(scene_type, DEPTH_CUTOFF_PROPERTY, FloatProperty(name="Depth Cutoff", default=99.5, min=0.0, max=100.0, update=_mark_profile_custom))
+            setattr(scene_type, POINT_BUDGET_PROPERTY, IntProperty(name="Import Point Budget", default=1_000_000, min=1, max=50_000_000, update=_mark_profile_custom))
+            setattr(scene_type, POINT_BUDGET_CONFIRMED_PROPERTY, BoolProperty(name="Confirm Large Budget", default=False, update=_mark_profile_custom))
         handlers = getattr(bpy.app, "handlers", None)
         timers = getattr(bpy.app, "timers", None)
         if handlers is not None and _recover_jobs_after_load not in handlers.load_post:
@@ -121,8 +175,18 @@ def _unregister_classes() -> None:
 
 def _unregister_scene_property() -> None:
     scene_type = getattr(bpy.types, "Scene", None)
-    if scene_type is not None and hasattr(scene_type, CAPTURE_SOURCE_PROPERTY):
-        delattr(scene_type, CAPTURE_SOURCE_PROPERTY)
+    if scene_type is not None:
+        for name in (
+            CAPTURE_SOURCE_PROPERTY,
+            PROFILE_PROPERTY,
+            CAMERA_ITERATIONS_PROPERTY,
+            CONFIDENCE_CUTOFF_PROPERTY,
+            DEPTH_CUTOFF_PROPERTY,
+            POINT_BUDGET_PROPERTY,
+            POINT_BUDGET_CONFIRMED_PROPERTY,
+        ):
+            if hasattr(scene_type, name):
+                delattr(scene_type, name)
 
 
 __all__ = ["get_host_decision", "register", "unregister"]

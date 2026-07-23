@@ -63,6 +63,9 @@ def install_fake_bpy(version=(5, 2, 1)):
 
     props = ModuleType("bpy.props")
     props.BoolProperty = lambda **kwargs: kwargs
+    props.EnumProperty = lambda **kwargs: kwargs
+    props.FloatProperty = lambda **kwargs: kwargs
+    props.IntProperty = lambda **kwargs: kwargs
     props.StringProperty = lambda **kwargs: kwargs
     bpy.props = props
     sys.modules["bpy"] = bpy
@@ -274,6 +277,7 @@ class RegistrationTests(unittest.TestCase):
                 "lingbot_map.run_fixture_job",
                 "lingbot_map.select_capture_source",
                 "lingbot_map.run_preflight_job",
+                "lingbot_map.run_reconstruction_job",
                 "lingbot_map.cancel_active_job",
             ],
         )

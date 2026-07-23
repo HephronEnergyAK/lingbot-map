@@ -29,6 +29,9 @@ if "bpy" not in sys.modules:
     bpy.utils = SimpleNamespace(register_class=lambda _cls: None, unregister_class=lambda _cls: None)
     props = ModuleType("bpy.props")
     props.BoolProperty = lambda **kwargs: kwargs
+    props.EnumProperty = lambda **kwargs: kwargs
+    props.FloatProperty = lambda **kwargs: kwargs
+    props.IntProperty = lambda **kwargs: kwargs
     props.StringProperty = lambda **kwargs: kwargs
     bpy.props = props
     sys.modules["bpy"] = bpy

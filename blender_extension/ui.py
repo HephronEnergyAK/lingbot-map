@@ -1,5 +1,8 @@
 """Blender Preferences and explicit lifecycle actions."""
 
+from dataclasses import asdict
+import hashlib
+import json
 from pathlib import Path
 
 import bpy
@@ -26,15 +29,50 @@ from .gpu_capability import (
 )
 from .job_lifecycle import (
     CAPTURE_SOURCE_PROPERTY,
+    CAMERA_ITERATIONS_PROPERTY,
+    CONFIDENCE_CUTOFF_PROPERTY,
+    DEPTH_CUTOFF_PROPERTY,
     JobLifecycleError,
+    POINT_BUDGET_CONFIRMED_PROPERTY,
+    POINT_BUDGET_PROPERTY,
+    PROFILE_PROPERTY,
     cancel_active_job,
     capture_source_draft_path,
     ensure_unique_scene_uuid,
     get_job_snapshot,
+    latest_successful_preflight,
     start_fixture_job,
     start_preflight_job,
+    start_reconstruction_job,
 )
 from .results import discover_ready_results
+
+
+PROFILE_DEFAULTS = {
+    "Draft": (1, 70.0, 99.5, 1_000_000),
+    "Balanced": (4, 50.0, 99.5, 5_000_000),
+    "High": (4, 30.0, 99.5, 10_000_000),
+}
+
+
+def _capability_settings_sha256(name: str) -> str:
+    camera, confidence, depth, budget = PROFILE_DEFAULTS[name]
+    document = {
+        "name": name,
+        "camera_iterations": camera,
+        "confidence_cutoff_percent": int(confidence),
+        "import_point_budget": budget,
+        "depth_cutoff_percent": depth,
+        "image_size": 518,
+        "patch_size": 14,
+        "scale_frames": 8,
+        "window_frames": 64,
+        "attention_backend": "sdpa",
+        "execution_mode": "eager",
+    }
+    return hashlib.sha256(
+        json.dumps(document, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
 
 
 class LINGBOTMAP_Preferences(bpy.types.AddonPreferences):
@@ -342,6 +380,82 @@ class LINGBOTMAP_OT_run_preflight_job(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class LINGBOTMAP_OT_run_reconstruction_job(bpy.types.Operator):
+    bl_idname = "lingbot_map.run_reconstruction_job"
+    bl_label = "Reconstruct"
+    bl_description = "Run qualified headless camera and depth reconstruction over every frame"
+
+    @classmethod
+    def poll(cls, context):
+        decision = get_host_decision()
+        capture = str(getattr(getattr(context, "scene", None), CAPTURE_SOURCE_PROPERTY, "")).strip()
+        return bool(decision and decision.supported and capture and get_job_snapshot().state not in {
+            "starting", "running", "reconnecting", "unresponsive", "cancelling"
+        })
+
+    def execute(self, context):
+        try:
+            blend_path = bpy.data.filepath
+            if not blend_path:
+                raise JobLifecycleError("Save the Blender file before launching a Job")
+            scene = context.scene
+            capture = str(getattr(scene, CAPTURE_SOURCE_PROPERTY, "")).strip()
+            preflight = latest_successful_preflight(blend_path, capture)
+            scene_uuid = ensure_unique_scene_uuid(scene, tuple(bpy.data.scenes))
+            if bpy.data.is_dirty:
+                raise JobLifecycleError("Save the .blend after its Scene UUID or other changes before launch")
+            preferences = _preferences(context)
+            managed_root = _managed_root(preferences)
+            devices = discover_physical_gpus(managed_root)
+            selected_uuid = select_gpu_uuid(devices, preferences.gpu_uuid.strip())
+            selected_gpu = next(device for device in devices if device.uuid == selected_uuid)
+            preferences.gpu_uuid = selected_uuid
+            catalog = bundled_model_catalog()
+            entries = tuple(entry for entry in catalog.entries if entry.role == "reconstruction")
+            if len(entries) != 1:
+                raise JobLifecycleError("Model Catalog must contain one Reconstruction Model")
+            entry = entries[0]
+            model_path = ModelStore(managed_root, catalog).validate(entry)
+            profile_name = str(getattr(scene, PROFILE_PROPERTY))
+            camera_iterations = int(getattr(scene, CAMERA_ITERATIONS_PROPERTY))
+            if camera_iterations > 4:
+                raise JobLifecycleError(
+                    "Custom camera iterations above four have no fixed v1 capability workload"
+                )
+            capability_name = (
+                profile_name if profile_name in PROFILE_DEFAULTS
+                else "Draft" if camera_iterations == 1 else "Balanced"
+            )
+            start_reconstruction_job(
+                managed_root=managed_root,
+                blend_path=blend_path,
+                scene_uuid=scene_uuid,
+                scene_name=scene.name,
+                timeline_start=scene.frame_current,
+                capture_draft_path=capture,
+                profile_name=profile_name,
+                camera_iterations=camera_iterations,
+                confidence_cutoff_percent=float(getattr(scene, CONFIDENCE_CUTOFF_PROPERTY)),
+                depth_cutoff_percent=float(getattr(scene, DEPTH_CUTOFF_PROPERTY)),
+                import_point_budget=int(getattr(scene, POINT_BUDGET_PROPERTY)),
+                point_budget_confirmed=bool(getattr(scene, POINT_BUDGET_CONFIRMED_PROPERTY)),
+                gpu=asdict(selected_gpu),
+                capability_profile_name=capability_name,
+                capability_profile_settings_sha256=_capability_settings_sha256(capability_name),
+                model={
+                    "catalog_version": catalog.version,
+                    "id": entry.id,
+                    "path": str(model_path),
+                    "sha256": entry.artifact.sha256,
+                },
+                preflight_result=preflight,
+            )
+        except (JobLifecycleError, RuntimeSetupError, ValueError, StopIteration) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
 class LINGBOTMAP_OT_cancel_active_job(bpy.types.Operator):
     bl_idname = "lingbot_map.cancel_active_job"
     bl_label = "Cancel Active Job"
@@ -482,6 +596,17 @@ class LINGBOTMAP_PT_reconstruct(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         row.enabled = bool(decision and decision.supported)
         row.operator(LINGBOTMAP_OT_run_preflight_job.bl_idname)
         layout.label(text="Preflight examines every frame without changing Scene FPS")
+        layout.prop(context.scene, PROFILE_PROPERTY, text="Profile")
+        box = layout.box()
+        box.prop(context.scene, CAMERA_ITERATIONS_PROPERTY, text="Camera Iterations")
+        box.prop(context.scene, CONFIDENCE_CUTOFF_PROPERTY, text="Confidence Cutoff %")
+        box.prop(context.scene, DEPTH_CUTOFF_PROPERTY, text="Depth Cutoff %")
+        box.prop(context.scene, POINT_BUDGET_PROPERTY, text="Import Point Budget")
+        if int(getattr(context.scene, POINT_BUDGET_PROPERTY)) > 10_000_000:
+            box.prop(context.scene, POINT_BUDGET_CONFIRMED_PROPERTY, text="Confirm >10M Budget")
+        run = layout.row()
+        run.enabled = bool(decision and decision.supported)
+        run.operator(LINGBOTMAP_OT_run_reconstruction_job.bl_idname)
 
 
 class LINGBOTMAP_PT_active_job(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
@@ -500,6 +625,8 @@ class LINGBOTMAP_PT_active_job(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
             layout.label(text=f"Job: {snapshot.job_id}")
         if snapshot.phase:
             layout.label(text=f"{snapshot.phase}: {snapshot.completed}/{snapshot.total}")
+        if snapshot.eta_seconds is not None:
+            layout.label(text=f"ETA: {snapshot.eta_seconds:.0f} s")
         if snapshot.state in {"starting", "running", "reconnecting", "unresponsive", "cancelling"}:
             layout.operator(LINGBOTMAP_OT_cancel_active_job.bl_idname)
 
@@ -544,6 +671,7 @@ CLASSES = (
     LINGBOTMAP_OT_run_fixture_job,
     LINGBOTMAP_OT_select_capture_source,
     LINGBOTMAP_OT_run_preflight_job,
+    LINGBOTMAP_OT_run_reconstruction_job,
     LINGBOTMAP_OT_cancel_active_job,
     LINGBOTMAP_PT_setup,
     LINGBOTMAP_PT_reconstruct,

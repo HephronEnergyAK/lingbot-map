@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import os
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -29,9 +30,16 @@ from .runtime_setup import RuntimeSetupError, process_identity, sha256_file
 
 SCENE_UUID_PROPERTY = "lingbot_map_scene_uuid"
 CAPTURE_SOURCE_PROPERTY = "lingbot_map_capture_source"
+PROFILE_PROPERTY = "lingbot_map_profile"
+CAMERA_ITERATIONS_PROPERTY = "lingbot_map_camera_iterations"
+CONFIDENCE_CUTOFF_PROPERTY = "lingbot_map_confidence_cutoff_percent"
+DEPTH_CUTOFF_PROPERTY = "lingbot_map_depth_cutoff_percent"
+POINT_BUDGET_PROPERTY = "lingbot_map_import_point_budget"
+POINT_BUDGET_CONFIRMED_PROPERTY = "lingbot_map_point_budget_confirmed"
 JOB_ID = re.compile(r"job-[0-9a-f]{32}\Z")
 TERMINAL_STATES = {"succeeded", "cancelled", "failed"}
 MAX_ACTIVE_ENTRIES = 32
+MAX_DIAGNOSTIC_ENTRIES = 4096
 
 
 class JobLifecycleError(RuntimeSetupError):
@@ -61,6 +69,7 @@ class JobSnapshot:
     phase: str | None = None
     completed: int = 0
     total: int = 0
+    eta_seconds: float | None = None
     heartbeat_sequence: int = 0
     location: str | None = None
 
@@ -163,6 +172,51 @@ def ensure_project_layout(blend_path: str | Path) -> Path:
     return root
 
 
+def latest_successful_preflight(
+    blend_path: str | Path, capture_source: str | Path
+) -> Mapping[str, Any]:
+    """Return the newest bounded successful preflight for the current source stat."""
+
+    source = normalized_capture_source(capture_source, blend_path)
+    root = ensure_project_layout(blend_path)
+    entries = list((root / "diagnostics").iterdir())
+    if len(entries) > MAX_DIAGNOSTIC_ENTRIES:
+        raise JobLifecycleError("Too many diagnostic entries to discover preflight safely")
+    candidates = []
+    current = source.stat()
+    for directory in entries:
+        if (
+            not directory.is_dir()
+            or directory.is_symlink()
+            or is_reparse_point(directory)
+            or not re.fullmatch(r"job-[0-9a-f]{32}--preflight-succeeded", directory.name)
+        ):
+            continue
+        path = directory / "preflight-result.json"
+        if not path.is_file() or path.is_symlink() or is_reparse_point(path):
+            continue
+        try:
+            document = read_json(path)
+            frozen = document["source"]
+            timing = document["timing"]
+            video = document["video"]
+            color = video["color"]
+            if (
+                frozen["absolute_path"] == str(source)
+                and frozen["size_bytes"] == current.st_size
+                and frozen["modification_time_ns"] == current.st_mtime_ns
+                and 8 <= int(timing["frame_count"]) <= 3000
+            ):
+                candidates.append((path.stat().st_mtime_ns, document))
+        except (KeyError, TypeError, ValueError, OSError, IpcError):
+            continue
+    if not candidates:
+        raise JobLifecycleError(
+            "Run a successful preflight for this unchanged Capture Source before Reconstruction"
+        )
+    return max(candidates, key=lambda item: item[0])[1]
+
+
 def _active_children(root: Path) -> list[Path]:
     jobs = root / ".jobs"
     entries = list(jobs.iterdir())
@@ -232,11 +286,19 @@ def validate_status(value: Any, job_id: str) -> dict[str, Any]:
     if isinstance(status["worker_monotonic"], bool) or not isinstance(status["worker_monotonic"], (int, float)):
         raise IpcError("worker_monotonic is invalid")
     require_text(status["heartbeat_utc"], label="heartbeat_utc", maximum=128)
-    progress = require_exact_object(status["progress"], {"completed", "total"}, label="progress")
+    progress = require_exact_object(
+        status["progress"], {"completed", "total", "eta_seconds"}, label="progress"
+    )
     _integer(progress["completed"], "progress.completed", 0)
     _integer(progress["total"], "progress.total", 0)
     if progress["completed"] > progress["total"]:
         raise IpcError("progress exceeds total")
+    eta = progress["eta_seconds"]
+    if eta is not None and (
+        isinstance(eta, bool) or not isinstance(eta, (int, float))
+        or not math.isfinite(float(eta)) or eta < 0
+    ):
+        raise IpcError("progress ETA is invalid")
     if status["error"] is not None and (not isinstance(status["error"], str) or len(status["error"].encode("utf-8")) > 16384):
         raise IpcError("status error text is invalid")
     return status
@@ -245,7 +307,10 @@ def validate_status(value: Any, job_id: str) -> dict[str, Any]:
 def validate_event(value: Any, job_id: str) -> dict[str, Any]:
     event = require_schema(
         value,
-        {"schema_version", "job_id", "sequence", "kind", "phase", "completed", "total", "message"},
+        {
+            "schema_version", "job_id", "sequence", "kind", "phase", "completed",
+            "total", "eta_seconds", "immediate", "message",
+        },
         label="event",
     )
     if event["job_id"] != job_id or event["kind"] not in {"phase", "progress", "warning", "error", "cancelled", "succeeded"}:
@@ -255,6 +320,14 @@ def validate_event(value: Any, job_id: str) -> dict[str, Any]:
     _integer(event["total"], "event.total", 0)
     if event["completed"] > event["total"]:
         raise IpcError("event progress exceeds total")
+    eta = event["eta_seconds"]
+    if eta is not None and (
+        isinstance(eta, bool) or not isinstance(eta, (int, float))
+        or not math.isfinite(float(eta)) or eta < 0
+    ):
+        raise IpcError("event ETA is invalid")
+    if not isinstance(event["immediate"], bool):
+        raise IpcError("event immediacy is invalid")
     require_text(event["phase"], label="event.phase", maximum=256)
     if not isinstance(event["message"], str) or len(event["message"].encode("utf-8")) > 16384:
         raise IpcError("event message is invalid")
@@ -588,6 +661,119 @@ class JobController:
             starting_message="Result Fixture Job is starting",
         )
 
+    def launch_reconstruction(
+        self,
+        *,
+        managed_root: Path,
+        blend_path: str | Path,
+        scene_uuid: str,
+        scene_name: str,
+        timeline_start: int,
+        capture_draft_path: str,
+        profile_name: str,
+        camera_iterations: int,
+        confidence_cutoff_percent: float,
+        depth_cutoff_percent: float,
+        import_point_budget: int,
+        point_budget_confirmed: bool,
+        gpu: Mapping[str, Any],
+        capability_profile_name: str,
+        capability_profile_settings_sha256: str,
+        model: Mapping[str, Any],
+        preflight_result: Mapping[str, Any],
+        initial_voxel_edge_length: float = 0.01,
+    ) -> str:
+        if self.has_active_job():
+            raise JobLifecycleError("This Blender process already launched an active Worker")
+        target = normalized_blend_path(blend_path)
+        source = normalized_capture_source(capture_draft_path, target)
+        root = ensure_project_layout(target)
+        if _active_children(root):
+            raise JobLifecycleError("This Project Result Root already contains an active Job")
+        runtime, python, runtime_id, lock_sha = _runtime_command(managed_root)
+        trusted_cwd = runtime / "empty-cwd"
+        if not trusted_cwd.is_dir() or trusted_cwd.is_symlink() or any(trusted_cwd.iterdir()):
+            raise JobLifecycleError("Worker Runtime trusted working directory is absent or not empty")
+        frozen = preflight_result["source"]
+        timing = preflight_result["timing"]
+        video = preflight_result["video"]
+        color = video["color"]
+        stat = source.stat()
+        if (
+            frozen["absolute_path"] != str(source)
+            or frozen["size_bytes"] != stat.st_size
+            or frozen["modification_time_ns"] != stat.st_mtime_ns
+        ):
+            raise JobLifecycleError("Successful preflight does not identify the current Capture Source")
+        job_id = f"job-{uuid.uuid4().hex}"
+        job_dir = root / ".jobs" / job_id
+        job_dir.mkdir()
+        target_scene = {
+            "blend_path": str(target),
+            "scene_uuid": str(uuid.UUID(scene_uuid)),
+            "scene_name": scene_name,
+        }
+        job_spec = {
+            "schema_version": SCHEMA_VERSION,
+            "job_id": job_id,
+            "target_scene": target_scene,
+            "timeline_start": int(timeline_start),
+            "project_root": str(root),
+            "reconstruction": {
+                "managed_root": str(Path(os.path.abspath(managed_root))),
+                "worker_lock_sha256": lock_sha,
+                "source": {
+                    "absolute_path": str(source),
+                    "scene_relative_path": scene_relative_capture_path(source, target),
+                    "size_bytes": int(stat.st_size),
+                    "modification_time_ns": int(stat.st_mtime_ns),
+                    "sha256": frozen["sha256"],
+                },
+                "preflight": {
+                    "frame_count": int(timing["frame_count"]),
+                    "video_stream_index": int(video["stream_index"]),
+                    "displayed_width": int(video["displayed_width"]),
+                    "displayed_height": int(video["displayed_height"]),
+                    "display_transform": video["display_transform"],
+                    "color_standard": color["standard"],
+                    "color_range": color["range"],
+                    "variable_frame_rate": bool(timing["variable_frame_rate"]),
+                },
+                "profile": {
+                    "name": profile_name,
+                    "camera_iterations": int(camera_iterations),
+                    "confidence_cutoff_percent": float(confidence_cutoff_percent),
+                    "depth_cutoff_percent": float(depth_cutoff_percent),
+                    "import_point_budget": int(import_point_budget),
+                    "point_budget_confirmed": bool(point_budget_confirmed),
+                },
+                "gpu": {
+                    "uuid": gpu["uuid"],
+                    "name": gpu["name"],
+                    "total_memory": int(gpu["total_memory"]),
+                    "driver_version": gpu["driver_version"],
+                    "compute_capability": list(gpu["compute_capability"]),
+                    "capability_profile_name": capability_profile_name,
+                    "capability_profile_settings_sha256": capability_profile_settings_sha256,
+                },
+                "model": dict(model),
+                "heartbeat_interval_seconds": 1.0,
+                "initial_voxel_edge_length": float(initial_voxel_edge_length),
+            },
+        }
+        return self._launch_spec(
+            runtime=runtime,
+            python=python,
+            runtime_id=runtime_id,
+            trusted_cwd=trusted_cwd,
+            job_dir=job_dir,
+            job_spec=job_spec,
+            worker_argument="--reconstruction-job",
+            target=target,
+            scene_uuid=scene_uuid,
+            starting_message="Reconstruction Job is starting",
+        )
+
     def _launch_spec(
         self,
         *,
@@ -609,10 +795,14 @@ class JobController:
         nonce = uuid.uuid4().hex
         process = None
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        environment = _worker_environment()
+        if "reconstruction" in job_spec:
+            environment["CUDA_VISIBLE_DEVICES"] = job_spec["reconstruction"]["gpu"]["uuid"]
+            environment["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         process = subprocess.Popen(
             [str(python), "-I", "-m", "lingbot_map_worker", worker_argument, str(spec_path), "--job-nonce", nonce],
             cwd=trusted_cwd,
-            env=_worker_environment(),
+            env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             # Fixture failures are structured in status/events. An inherited
@@ -745,7 +935,8 @@ class JobController:
         return JobSnapshot(
             state, message, status["job_id"], active.target_blend,
             active.target_scene_uuid, status["phase"], progress["completed"],
-            progress["total"], status["heartbeat_sequence"], str(active.job_dir),
+            progress["total"], progress["eta_seconds"], status["heartbeat_sequence"],
+            str(active.job_dir),
         )
 
     def _publish_terminal(self, directory: Path, job_id: str) -> None:
@@ -938,6 +1129,10 @@ def start_preflight_job(**kwargs) -> str:
 
 def start_result_fixture_job(**kwargs) -> str:
     return _controller.launch_result_fixture(**kwargs)
+
+
+def start_reconstruction_job(**kwargs) -> str:
+    return _controller.launch_reconstruction(**kwargs)
 
 
 def cancel_active_job() -> bool:

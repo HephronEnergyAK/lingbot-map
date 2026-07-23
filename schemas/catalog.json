@@ -17,13 +17,13 @@
       "id": "job-spec",
       "version": "1.0.0",
       "path": "job-spec.schema.json",
-      "sha256": "bfb65487d70c9884ea6ee2969d385cc6a0a35bac0a865aca9008b8c36c531693"
+      "sha256": "286c2159dd4dae8f10174f928c313b92dd55d6fd7fccc40407d3a52dd6216d13"
     },
     {
       "id": "reconstruction-result",
       "version": "1.0.0",
       "path": "reconstruction-result.schema.json",
-      "sha256": "60d298ec55ed8b2c0a0a47b304c10952e54de50200faeaeaa48898c8dbaf261c"
+      "sha256": "c36d39e05b738f59e1cc7da7c9e850155b360beffa72fc0b4cd99f66b9270383"
     },
     {
       "id": "preflight-result",
@@ -41,13 +41,13 @@
       "id": "job-event",
       "version": "1.0.0",
       "path": "job-event.schema.json",
-      "sha256": "3d312feb799a7df9eb5cde1cd681cb3e7f4915dcef353f2de1f7f7ef4aefc667"
+      "sha256": "07e18e9e31a7eb3d10d372d70e69f24649c50d563e0529912c23556ef6185cb5"
     },
     {
       "id": "job-status",
       "version": "1.0.0",
       "path": "job-status.schema.json",
-      "sha256": "29c3042dd6b61bb9c3797239faf55a119ab59cbe27d03c8fc5588b2b9d524de5"
+      "sha256": "50d9fa361a4b5260299f9f17bf474edd30f3bed9697ad1ff63f3ed694694d4d9"
     }
   ]
 }

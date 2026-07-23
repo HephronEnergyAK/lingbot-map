@@ -23,6 +23,24 @@ EXPECTED_CUDA_VERSION = "13.0"
 ALLOWED_UNEXPECTED_PREFIXES = ("point_head.", "local_point_head.", "track_head.")
 
 
+def classify_cuda_failure(exception: BaseException, torch_module=None) -> str | None:
+    if torch_module is None:
+        import torch as torch_module
+    if isinstance(exception, getattr(torch_module.cuda, "OutOfMemoryError", ())):
+        return "cuda-out-of-memory"
+    message = str(exception).lower()
+    patterns = (
+        ("cuda-out-of-memory", r"cuda.*out of memory|cudaerror_memoryallocation"),
+        ("cuda-device-loss", r"device lost|cudaerror_devicelost|device-side assert"),
+        ("cuda-driver-reset", r"driver.*(reset|shutting down)|cudaerror_deviceuninitialized"),
+        ("windows-tdr", r"launch timeout|cudaerror_launchtimeout|timed out and was terminated"),
+    )
+    for classification, pattern in patterns:
+        if re.search(pattern, message):
+            return classification
+    return None
+
+
 def _sha256_file(path: Path, cancelled: Callable[[], bool]) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -195,17 +213,4 @@ class TorchCapabilityWorkload:
                 pass
 
     def classify_gpu_failure(self, exception: BaseException) -> str | None:
-        torch = self._torch_module()
-        if isinstance(exception, getattr(torch.cuda, "OutOfMemoryError", ())):
-            return "cuda-out-of-memory"
-        message = str(exception).lower()
-        patterns = (
-            ("cuda-out-of-memory", r"cuda.*out of memory|cudaerror_memoryallocation"),
-            ("cuda-device-loss", r"device lost|cudaerror_devicelost|device-side assert"),
-            ("cuda-driver-reset", r"driver.*(reset|shutting down)|cudaerror_deviceuninitialized"),
-            ("windows-tdr", r"launch timeout|cudaerror_launchtimeout|timed out and was terminated"),
-        )
-        for classification, pattern in patterns:
-            if re.search(pattern, message):
-                return classification
-        return None
+        return classify_cuda_failure(exception, self._torch_module())

@@ -78,6 +78,25 @@ class PreflightReport:
     ffmpeg_libraries: tuple[tuple[str, tuple[int, ...]], ...]
 
 
+@dataclass(frozen=True)
+class DecodeContract:
+    identity: SourceIdentity
+    frame_count: int
+    video_stream_index: int
+    displayed_width: int
+    displayed_height: int
+    display_transform: str
+    color_standard: str
+    color_range: str
+
+
+@dataclass(frozen=True)
+class DecodedFrame:
+    frame_index: int
+    pts_seconds: float
+    srgb: np.ndarray
+
+
 CancelCheck = Callable[[], bool]
 Progress = Callable[[str, int], None]
 
@@ -410,3 +429,68 @@ def preflight_capture_source(
         tuple(timestamps), variable, rgb_digest.hexdigest(), rgb_bytes,
         audio, str(av.__version__), libraries,
     )
+
+
+def iter_capture_source_frames(
+    path: Path,
+    contract: DecodeContract,
+    *,
+    cancel: CancelCheck = lambda: False,
+    thread_budget: int = 1,
+) -> Iterable[DecodedFrame]:
+    """Decode every frame again under the immutable successful-preflight contract."""
+
+    path = _plain_local_source(path)
+    require_same_source(path, contract.identity, cancel)
+    decoded = 0
+    last_seconds = -math.inf
+    try:
+        with av.open(str(path), mode="r") as container:
+            stream = select_video_stream(container)
+            if int(stream.index) != contract.video_stream_index:
+                raise DecoderError("Selected video stream changed after preflight")
+            stream.codec_context.thread_count = max(1, int(thread_budget))
+            stream.codec_context.thread_type = "SLICE"
+            inherited: DisplayTransform | None = None
+            for frame in container.decode(stream):
+                _cancelled(cancel)
+                if decoded >= contract.frame_count:
+                    raise DecoderError("Capture Source produced more frames than preflight")
+                if bool(getattr(frame, "is_corrupt", False)):
+                    raise DecoderError(f"Frame {decoded} is corrupt during Reconstruction")
+                if bool(frame.interlaced_frame) or _has_alpha(frame):
+                    raise DecoderError(f"Frame {decoded} changed progressive or opaque contract")
+                if _sample_aspect_ratio(frame, stream) != Fraction(1, 1):
+                    raise DecoderError(f"Frame {decoded} changed square-pixel contract")
+                if frame.pts is None or frame.time_base is None:
+                    raise DecoderError(f"Frame {decoded} has no presentation timestamp")
+                seconds = float(Fraction(int(frame.pts)) * Fraction(frame.time_base))
+                if not math.isfinite(seconds) or seconds <= last_seconds:
+                    raise DecoderError(f"Frame {decoded} timestamp changed or is invalid")
+                transform = display_transform(frame, stream, inherited)
+                inherited = transform
+                color = color_description(frame)
+                rgb = apply_display_transform(frame.to_ndarray(format="rgb24"), transform)
+                height, width = rgb.shape[:2]
+                if (
+                    transform.name != contract.display_transform
+                    or color.standard != contract.color_standard
+                    or color.range != contract.color_range
+                    or width != contract.displayed_width
+                    or height != contract.displayed_height
+                ):
+                    raise DecoderError(
+                        f"Frame {decoded} dimensions, transform, or color changed after preflight"
+                    )
+                yield DecodedFrame(decoded, seconds, rgb)
+                decoded += 1
+                last_seconds = seconds
+    except (PreflightCancelled, DecoderError):
+        raise
+    except av.error.FFmpegError as exc:
+        raise DecoderError(f"Decode failed at frame {decoded}: {exc}") from exc
+    if decoded != contract.frame_count:
+        raise DecoderError(
+            f"Capture Source produced {decoded} frames; preflight recorded {contract.frame_count}"
+        )
+    require_same_source(path, contract.identity, cancel)

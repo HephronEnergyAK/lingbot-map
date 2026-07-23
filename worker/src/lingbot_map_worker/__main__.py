@@ -45,6 +45,12 @@ def main() -> int:
         metavar="JOB_SPEC",
         help="Build one deterministic CPU Reconstruction Result fixture",
     )
+    parser.add_argument(
+        "--reconstruction-job",
+        type=Path,
+        metavar="JOB_SPEC",
+        help="Run one qualified short-source Reconstruction Job",
+    )
     parser.add_argument("--job-nonce", help=argparse.SUPPRESS)
     arguments = parser.parse_args()
     if arguments.identity:
@@ -76,6 +82,12 @@ def main() -> int:
         from .result_fixture_job import run_result_fixture_job
 
         return run_result_fixture_job(arguments.result_fixture_job, arguments.job_nonce)
+    if arguments.reconstruction_job is not None:
+        if arguments.job_nonce is None:
+            parser.error("--reconstruction-job requires --job-nonce")
+        from .reconstruction_job import run_reconstruction_job
+
+        return run_reconstruction_job(arguments.reconstruction_job, arguments.job_nonce)
     parser.error("a validated Job Control Envelope is required")
     return 2
 

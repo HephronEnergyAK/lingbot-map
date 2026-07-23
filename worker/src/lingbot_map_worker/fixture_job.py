@@ -39,7 +39,8 @@ STATUS_FIELDS = {
     "heartbeat_utc", "worker_monotonic", "progress_event_sequence", "progress", "error",
 }
 EVENT_FIELDS = {
-    "schema_version", "job_id", "sequence", "kind", "phase", "completed", "total", "message",
+    "schema_version", "job_id", "sequence", "kind", "phase", "completed", "total",
+    "eta_seconds", "immediate", "message",
 }
 TERMINAL_STATES = {"succeeded", "cancelled", "failed"}
 
@@ -85,7 +86,10 @@ def _target(value: Any) -> dict[str, Any]:
 def validate_job_spec(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise IpcError("JobSpec has unknown or missing fields")
-    job_kinds = {name for name in ("fixture", "capture_source", "result_fixture") if name in value}
+    job_kinds = {
+        name for name in ("fixture", "capture_source", "result_fixture", "reconstruction")
+        if name in value
+    }
     if len(job_kinds) != 1 or set(value) != COMMON_JOB_FIELDS | job_kinds:
         raise IpcError("JobSpec must contain exactly one supported Job kind")
     job = require_schema(value, COMMON_JOB_FIELDS | job_kinds, label="JobSpec")
@@ -128,7 +132,7 @@ def validate_job_spec(value: Any) -> dict[str, Any]:
             raise IpcError("Capture Source scene-relative path is invalid")
         _integer(capture["size_bytes"], "capture_source.size_bytes", 1)
         _integer(capture["modification_time_ns"], "capture_source.modification_time_ns", 1)
-    else:
+    elif "result_fixture" in job:
         fixture = require_exact_object(
             job["result_fixture"],
             {
@@ -180,6 +184,107 @@ def validate_job_spec(value: Any) -> dict[str, Any]:
             fixture["heartbeat_interval_seconds"],
             "result_fixture.heartbeat_interval_seconds", 0.001, 5,
         )
+    else:
+        reconstruction = require_exact_object(
+            job["reconstruction"],
+            {
+                "managed_root", "worker_lock_sha256", "source", "preflight", "profile", "gpu", "model",
+                "heartbeat_interval_seconds", "initial_voxel_edge_length",
+            },
+            label="reconstruction",
+        )
+        managed_root = Path(require_text(
+            reconstruction["managed_root"], label="reconstruction.managed_root", maximum=32767
+        ))
+        if not managed_root.is_absolute():
+            raise IpcError("Reconstruction managed root must be absolute")
+        if not re.fullmatch(r"[0-9a-f]{64}", require_text(reconstruction["worker_lock_sha256"], label="reconstruction.worker_lock_sha256", maximum=64)):
+            raise IpcError("Reconstruction Worker lock checksum is invalid")
+        source = require_exact_object(
+            reconstruction["source"],
+            {"absolute_path", "scene_relative_path", "size_bytes", "modification_time_ns", "sha256"},
+            label="reconstruction.source",
+        )
+        absolute = Path(require_text(source["absolute_path"], label="source.absolute_path", maximum=32767))
+        if not absolute.is_absolute() or absolute.suffix.lower() not in {".mp4", ".mov"}:
+            raise IpcError("Reconstruction source path is invalid")
+        relative = source["scene_relative_path"]
+        if relative is not None and (
+            not isinstance(relative, str) or not relative.startswith("//") or len(relative) > 32767
+        ):
+            raise IpcError("Reconstruction source relative path is invalid")
+        _integer(source["size_bytes"], "source.size_bytes", 1)
+        _integer(source["modification_time_ns"], "source.modification_time_ns", 1)
+        if not re.fullmatch(r"[0-9a-f]{64}", require_text(source["sha256"], label="source.sha256", maximum=64)):
+            raise IpcError("Reconstruction source checksum is invalid")
+        preflight = require_exact_object(
+            reconstruction["preflight"],
+            {
+                "frame_count", "video_stream_index", "displayed_width", "displayed_height",
+                "display_transform", "color_standard", "color_range", "variable_frame_rate",
+            },
+            label="reconstruction.preflight",
+        )
+        _integer(preflight["frame_count"], "preflight.frame_count", 8, 3000)
+        _integer(preflight["video_stream_index"], "preflight.video_stream_index", 0)
+        _integer(preflight["displayed_width"], "preflight.displayed_width", 1)
+        _integer(preflight["displayed_height"], "preflight.displayed_height", 1)
+        require_text(preflight["display_transform"], label="preflight.display_transform", maximum=64)
+        if preflight["color_standard"] not in {"bt601", "bt709"} or preflight["color_range"] not in {"limited", "full"}:
+            raise IpcError("Reconstruction preflight color is invalid")
+        if not isinstance(preflight["variable_frame_rate"], bool):
+            raise IpcError("Reconstruction preflight VFR flag is invalid")
+        profile = require_exact_object(
+            reconstruction["profile"],
+            {
+                "name", "camera_iterations", "confidence_cutoff_percent",
+                "depth_cutoff_percent", "import_point_budget", "point_budget_confirmed",
+            },
+            label="reconstruction.profile",
+        )
+        require_text(profile["name"], label="profile.name", maximum=128)
+        _integer(profile["camera_iterations"], "profile.camera_iterations", 1, 16)
+        _finite(profile["confidence_cutoff_percent"], "profile.confidence_cutoff_percent", 0, 100)
+        _finite(profile["depth_cutoff_percent"], "profile.depth_cutoff_percent", 0, 100)
+        _integer(profile["import_point_budget"], "profile.import_point_budget", 1, 50_000_000)
+        if not isinstance(profile["point_budget_confirmed"], bool):
+            raise IpcError("profile.point_budget_confirmed is invalid")
+        if profile["import_point_budget"] > 10_000_000 and not profile["point_budget_confirmed"]:
+            raise IpcError("Import Point Budget above ten million requires confirmation")
+        gpu = require_exact_object(
+            reconstruction["gpu"],
+            {
+                "uuid", "name", "total_memory", "driver_version", "compute_capability",
+                "capability_profile_name", "capability_profile_settings_sha256",
+            },
+            label="reconstruction.gpu",
+        )
+        if not re.fullmatch(r"(?:GPU|MIG)-[A-Za-z0-9-]{8,90}", require_text(gpu["uuid"], label="gpu.uuid", maximum=96)):
+            raise IpcError("Reconstruction GPU UUID is invalid")
+        require_text(gpu["name"], label="gpu.name", maximum=256)
+        require_text(gpu["driver_version"], label="gpu.driver_version", maximum=128)
+        _integer(gpu["total_memory"], "gpu.total_memory", 1)
+        capability = gpu["compute_capability"]
+        if not isinstance(capability, list) or len(capability) != 2 or not all(
+            isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in capability
+        ):
+            raise IpcError("Reconstruction GPU compute capability is invalid")
+        require_text(gpu["capability_profile_name"], label="gpu.capability_profile_name", maximum=128)
+        if not re.fullmatch(r"[0-9a-f]{64}", require_text(gpu["capability_profile_settings_sha256"], label="gpu.capability_profile_settings_sha256", maximum=64)):
+            raise IpcError("Capability profile identity is invalid")
+        model = require_exact_object(
+            reconstruction["model"], {"catalog_version", "id", "path", "sha256"},
+            label="reconstruction.model",
+        )
+        require_text(model["catalog_version"], label="model.catalog_version", maximum=64)
+        require_text(model["id"], label="model.id", maximum=256)
+        model_path = Path(require_text(model["path"], label="model.path", maximum=32767))
+        if not model_path.is_absolute():
+            raise IpcError("Reconstruction Model path must be absolute")
+        if not re.fullmatch(r"[0-9a-f]{64}", require_text(model["sha256"], label="model.sha256", maximum=64)):
+            raise IpcError("Reconstruction Model checksum is invalid")
+        _finite(reconstruction["heartbeat_interval_seconds"], "reconstruction.heartbeat_interval_seconds", 0.001, 5)
+        _finite(reconstruction["initial_voxel_edge_length"], "reconstruction.initial_voxel_edge_length", 1e-12, 1e12)
     return job
 
 
@@ -226,6 +331,8 @@ class StatusStore:
         self._state = "starting"
         self._phase = "starting"
         self._completed = 0
+        self._total = total
+        self._eta_seconds: float | None = None
         self._error: str | None = None
         self._terminal = False
         self._write_status_locked()
@@ -240,7 +347,11 @@ class StatusStore:
             "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
             "worker_monotonic": time.monotonic(),
             "progress_event_sequence": self._event_sequence,
-            "progress": {"completed": self._completed, "total": self.total},
+            "progress": {
+                "completed": self._completed,
+                "total": self._total,
+                "eta_seconds": self._eta_seconds,
+            },
             "error": self._error,
         }
         require_schema(document, STATUS_FIELDS, label="status")
@@ -259,17 +370,35 @@ class StatusStore:
             self._write_status_locked()
             return True
 
-    def emit(self, kind: str, phase: str, completed: int, message: str, *, state: str = "running", error: str | None = None) -> None:
+    def emit(
+        self,
+        kind: str,
+        phase: str,
+        completed: int,
+        message: str,
+        *,
+        total: int | None = None,
+        eta_seconds: float | None = None,
+        immediate: bool = True,
+        state: str = "running",
+        error: str | None = None,
+    ) -> None:
         with self._lock:
             self._event_sequence += 1
             self._state = state
             self._phase = require_text(phase, label="event.phase", maximum=256)
-            self._completed = _integer(completed, "event.completed", 0, self.total)
+            event_total = self.total if total is None else _integer(total, "event.total", 0)
+            self._completed = _integer(completed, "event.completed", 0, event_total)
+            self._total = event_total
+            if eta_seconds is not None:
+                eta_seconds = _finite(eta_seconds, "event.eta_seconds", 0, 315576000)
+            self._eta_seconds = eta_seconds
             self._error = error
             event = {
                 "schema_version": SCHEMA_VERSION, "job_id": self.job_id,
                 "sequence": self._event_sequence, "kind": kind, "phase": phase,
-                "completed": completed, "total": self.total, "message": message,
+                "completed": completed, "total": event_total,
+                "eta_seconds": eta_seconds, "immediate": bool(immediate), "message": message,
             }
             require_schema(event, EVENT_FIELDS, label="event")
             line = encode_json(event) + b"\n"
@@ -287,7 +416,19 @@ class StatusStore:
         if state not in TERMINAL_STATES:
             raise FixtureJobError(f"invalid terminal state: {state}")
         kind = "error" if state == "failed" else state
-        self.emit(kind, state, self._completed, message, state=state, error=error)
+        completed = self.total if state == "succeeded" else self._completed
+        total = self.total if state == "succeeded" else self._total
+        self.emit(
+            kind,
+            state,
+            completed,
+            message,
+            total=total,
+            eta_seconds=None,
+            immediate=True,
+            state=state,
+            error=error,
+        )
         with self._lock:
             self._terminal = True
 

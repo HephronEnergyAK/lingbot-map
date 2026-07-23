@@ -48,6 +48,7 @@ if np is not None:
         require_worker_memory,
         with_headroom,
     )
+    from lingbot_map_worker.provenance import result_provenance
 
 
 SHA = "a" * 64
@@ -89,6 +90,13 @@ class ResultFixture:
         self.blend.touch()
         self.source_path = root / "capture.mp4"
         self.source_path.write_bytes(b"immutable fixture capture")
+        selected_profile = ResultProfile(
+            profile.pop("name", "Balanced"),
+            profile.pop("confidence_cutoff_percent", 50.0),
+            profile.pop("depth_cutoff_percent", 99.5),
+            profile.pop("import_point_budget", 8),
+            profile.pop("initial_voxel_edge_length", 0.01),
+        )
         self.request = ResultBuildRequest(
             job_id="job-" + "1" * 32,
             project_root=self.project,
@@ -107,24 +115,25 @@ class ResultFixture:
             },
             source_to_model=np.eye(3, dtype="<f8"),
             predictions=(_prediction(0),),
-            profile=ResultProfile(
-                profile.pop("name", "Balanced"),
-                profile.pop("confidence_cutoff_percent", 50.0),
-                profile.pop("depth_cutoff_percent", 99.5),
-                profile.pop("import_point_budget", 8),
-                profile.pop("initial_voxel_edge_length", 0.01),
+            profile=selected_profile,
+            provenance=result_provenance(
+                runtime_id="2" * 64,
+                worker_version="0.1.0",
+                job_spec_sha256="3" * 64,
+                model_id="fixture-model",
+                model_sha256="4" * 64,
+                source_sha256=hashlib.sha256(self.source_path.read_bytes()).hexdigest(),
+                profile_name=selected_profile.name,
+                camera_iterations=4,
+                confidence_cutoff_percent=selected_profile.confidence_cutoff_percent,
+                depth_cutoff_percent=selected_profile.depth_cutoff_percent,
+                import_point_budget=selected_profile.import_point_budget,
+                plan=None,
+                gpu=None,
+                suspension_count=0,
+                suspension_seconds=0,
+                fixture=True,
             ),
-            provenance={
-                "runtime_id": "2" * 64,
-                "worker_version": "0.1.0",
-                "job_spec_sha256": "3" * 64,
-                "model_sha256": "4" * 64,
-                "source_sha256": hashlib.sha256(self.source_path.read_bytes()).hexdigest(),
-                "preprocessing_rule_version": "1.0.0",
-                "filtering_rule_version": "1.0.0",
-                "point_reducer_rule_version": "1.0.0",
-                "resource_estimate_version": "1.0.0",
-            },
             created_utc="2026-07-23T01:02:03+00:00",
             result_id="result-" + "5" * 32,
         )

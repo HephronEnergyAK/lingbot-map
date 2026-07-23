@@ -34,6 +34,7 @@ from .result_pipeline import (
     build_reconstruction_result,
 )
 from .result_resources import FixedResourceProbe
+from .provenance import result_provenance
 
 
 _FIXTURE_MODEL_SHA256 = hashlib.sha256(b"lingbot-map-result-fixture-model-1.0.0").hexdigest()
@@ -136,17 +137,24 @@ def run_result_fixture_job(spec_path: Path, nonce: str) -> int:
                     int(fixture["import_point_budget"]),
                     float(fixture["initial_voxel_edge_length"]),
                 ),
-                provenance={
-                    "runtime_id": control["runtime_id"],
-                    "worker_version": __version__,
-                    "job_spec_sha256": control["job_spec"]["sha256"],
-                    "model_sha256": _FIXTURE_MODEL_SHA256,
-                    "source_sha256": source_sha256,
-                    "preprocessing_rule_version": "1.0.0",
-                    "filtering_rule_version": "1.0.0",
-                    "point_reducer_rule_version": "1.0.0",
-                    "resource_estimate_version": "1.0.0",
-                },
+                provenance=result_provenance(
+                    runtime_id=control["runtime_id"],
+                    worker_version=__version__,
+                    job_spec_sha256=control["job_spec"]["sha256"],
+                    model_id="result-fixture-model",
+                    model_sha256=_FIXTURE_MODEL_SHA256,
+                    source_sha256=source_sha256,
+                    profile_name="Fixture",
+                    camera_iterations=1,
+                    confidence_cutoff_percent=float(fixture["confidence_cutoff_percent"]),
+                    depth_cutoff_percent=float(fixture["depth_cutoff_percent"]),
+                    import_point_budget=int(fixture["import_point_budget"]),
+                    plan=None,
+                    gpu=None,
+                    suspension_count=0,
+                    suspension_seconds=0,
+                    fixture=True,
+                ),
                 warnings=({"code": "fixture", "message": "Deterministic CPU acceptance fixture"},),
                 created_utc=datetime.now(timezone.utc).isoformat(),
             )

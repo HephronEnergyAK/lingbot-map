@@ -503,7 +503,12 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
         require_text(record["message"], label="warning.message", maximum=16384)
     provenance = require_exact_object(
         manifest["provenance"],
-        {"runtime_id", "worker_version", "job_spec_sha256", "model_sha256", "source_sha256", "preprocessing_rule_version", "filtering_rule_version", "point_reducer_rule_version", "resource_estimate_version"},
+        {
+            "runtime_id", "worker_version", "job_spec_sha256", "model_sha256",
+            "source_sha256", "preprocessing_rule_version", "filtering_rule_version",
+            "point_reducer_rule_version", "resource_estimate_version", "models",
+            "gpu", "profile", "preprocessing", "inference", "suspension", "system",
+        },
         label="provenance",
     )
     for name in ("runtime_id", "job_spec_sha256", "model_sha256", "source_sha256"):
@@ -518,6 +523,109 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
     ):
         if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", require_text(provenance[name], label=name, maximum=64)):
             raise ResultBundleError(f"provenance rule version is invalid: {name}")
+    models = provenance["models"]
+    if not isinstance(models, list) or not models:
+        raise ResultBundleError("provenance models must be a non-empty array")
+    for raw in models:
+        model = require_exact_object(raw, {"id", "role", "sha256"}, label="provenance model")
+        require_text(model["id"], label="model.id", maximum=256)
+        if model["role"] not in {"reconstruction", "auxiliary", "fixture"}:
+            raise ResultBundleError("provenance model role is invalid")
+        if not SHA256.fullmatch(str(model["sha256"])):
+            raise ResultBundleError("provenance model checksum is invalid")
+    if not any(model["sha256"] == provenance["model_sha256"] for model in models):
+        raise ResultBundleError("primary model checksum is absent from provenance models")
+    gpu = provenance["gpu"]
+    if gpu is not None:
+        gpu = require_exact_object(
+            gpu,
+            {
+                "uuid", "name", "total_memory", "driver_version",
+                "compute_capability", "torch_version", "cuda_version",
+                "attention_backend",
+            },
+            label="provenance gpu",
+        )
+        for name in ("uuid", "name", "driver_version", "torch_version", "cuda_version", "attention_backend"):
+            require_text(gpu[name], label=f"gpu.{name}", maximum=256)
+        if isinstance(gpu["total_memory"], bool) or not isinstance(gpu["total_memory"], int) or gpu["total_memory"] <= 0:
+            raise ResultBundleError("gpu.total_memory is invalid")
+        capability = gpu["compute_capability"]
+        if not isinstance(capability, list) or len(capability) != 2 or not all(
+            isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in capability
+        ):
+            raise ResultBundleError("gpu.compute_capability is invalid")
+    profile_provenance = require_exact_object(
+        provenance["profile"],
+        {
+            "name", "settings_sha256", "camera_iterations",
+            "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget",
+        },
+        label="provenance profile",
+    )
+    require_text(profile_provenance["name"], label="profile.name", maximum=128)
+    if not SHA256.fullmatch(str(profile_provenance["settings_sha256"])):
+        raise ResultBundleError("profile settings checksum is invalid")
+    if profile_provenance["name"] != manifest["profile"]["name"]:
+        raise ResultBundleError("profile provenance disagrees with Result profile")
+    for name in (
+        "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget"
+    ):
+        if profile_provenance[name] != manifest["profile"][name]:
+            raise ResultBundleError(f"profile provenance disagrees with Result field: {name}")
+    preprocessing = require_exact_object(
+        provenance["preprocessing"],
+        {"image_size", "patch_size", "mode", "resize", "color", "normalization"},
+        label="provenance preprocessing",
+    )
+    if preprocessing != {
+        "image_size": 518,
+        "patch_size": 14,
+        "mode": "canonical-crop-v1",
+        "resize": "pillow-bicubic",
+        "color": "uint8-srgb",
+        "normalization": "float32-rgb-divide-255",
+    }:
+        raise ResultBundleError("preprocessing provenance is not the fixed native-v1 contract")
+    inference = require_exact_object(
+        provenance["inference"],
+        {
+            "mode", "keyframe_interval", "scale_frames", "window_frames",
+            "overlap_keyframes", "prediction_heads",
+        },
+        label="provenance inference",
+    )
+    if inference["mode"] not in {"streaming", "windowed", "fixture"}:
+        raise ResultBundleError("inference mode is invalid")
+    for name in ("keyframe_interval", "scale_frames", "window_frames", "overlap_keyframes"):
+        if isinstance(inference[name], bool) or not isinstance(inference[name], int) or inference[name] < 0:
+            raise ResultBundleError(f"inference {name} is invalid")
+    if inference["prediction_heads"] not in [["camera", "depth"], ["fixture"]]:
+        raise ResultBundleError("inference prediction heads are invalid")
+    suspension = require_exact_object(
+        provenance["suspension"], {"count", "total_seconds"}, label="provenance suspension"
+    )
+    if isinstance(suspension["count"], bool) or not isinstance(suspension["count"], int) or suspension["count"] < 0:
+        raise ResultBundleError("suspension count is invalid")
+    if isinstance(suspension["total_seconds"], bool) or not isinstance(suspension["total_seconds"], (int, float)) or not math.isfinite(float(suspension["total_seconds"])) or suspension["total_seconds"] < 0:
+        raise ResultBundleError("suspension duration is invalid")
+    system = require_exact_object(
+        provenance["system"],
+        {
+            "logical_processors", "global_thread_budget", "decoder_threads",
+            "preprocessing_threads", "output_threads", "onnx_threads",
+            "torch_intraop_threads", "torch_interop_threads", "priority",
+        },
+        label="provenance system",
+    )
+    for name in (
+        "logical_processors", "global_thread_budget", "decoder_threads",
+        "preprocessing_threads", "output_threads", "onnx_threads",
+        "torch_intraop_threads", "torch_interop_threads",
+    ):
+        if isinstance(system[name], bool) or not isinstance(system[name], int) or system[name] < 1:
+            raise ResultBundleError(f"system {name} is invalid")
+    require_text(system["priority"], label="system.priority", maximum=64)
     logs = manifest["logs"]
     if not isinstance(logs, list):
         raise ResultBundleError("logs must be an array")

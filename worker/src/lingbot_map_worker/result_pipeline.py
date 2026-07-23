@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -86,6 +86,26 @@ class ResultBuildOutcome:
     published: PublishedResult
     filters: tuple[FrameFilterStatistics, ...]
     maximum_reducer_entries: int
+
+
+@dataclass(frozen=True)
+class IncrementalResultRequest:
+    job_id: str
+    project_root: Path
+    target_scene: Mapping[str, Any]
+    timeline_start: int
+    source: Mapping[str, Any]
+    source_to_model: np.ndarray
+    frame_count: int
+    profile: ResultProfile
+    provenance: Mapping[str, Any]
+    warnings: tuple[Mapping[str, str], ...] = ()
+    created_utc: str | None = None
+    result_id: str | None = None
+
+
+PredictionDecoder = Callable[[Any, Any, float], AlignedPrediction]
+ProvenanceFactory = Callable[[], Mapping[str, Any]]
 
 
 _BLENDER_FROM_OPENCV_CAMERA = np.diag((1.0, -1.0, -1.0, 1.0))
@@ -363,3 +383,202 @@ def build_reconstruction_result(
         tuple(filter_statistics),
         reducer.maximum_occupied_entries,
     )
+
+
+class IncrementalBundleResultSink:
+    """Filter and reduce each finalized frame without retaining dense history."""
+
+    def __init__(
+        self,
+        request: IncrementalResultRequest,
+        *,
+        prediction_decoder: PredictionDecoder,
+        resource_probe: ResourceProbe,
+        cancel: CancelCheck,
+        provenance_factory: ProvenanceFactory | None = None,
+    ) -> None:
+        _validate_profile(request.profile)
+        if request.frame_count < 1:
+            raise ResultPipelineError("incremental Result frame count must be positive")
+        _strict_array(request.source_to_model, "<f8", (3, 3), "source_to_model")
+        if (
+            not np.isfinite(request.source_to_model).all()
+            or abs(float(np.linalg.det(request.source_to_model))) <= 1e-12
+        ):
+            raise ResultPipelineError("source_to_model must be finite and invertible")
+        self.request = request
+        self.prediction_decoder = prediction_decoder
+        self.resource_probe = resource_probe
+        self.cancel = cancel
+        self.provenance_factory = provenance_factory
+        self.estimated_result = estimate_core_result_bytes(
+            request.frame_count, request.profile.import_point_budget
+        )
+        self.reducer = PointReducer(
+            request.profile.import_point_budget,
+            initial_edge_length=request.profile.initial_voxel_edge_length,
+            origin=(0.0, 0.0, 0.0),
+        )
+        self.filters: list[FrameFilterStatistics] = []
+        self.cameras: list[np.ndarray] = []
+        self.model_intrinsics: list[np.ndarray] = []
+        self.source_intrinsics: list[np.ndarray] = []
+        self.fov: list[tuple[float, float]] = []
+        self.timestamps: list[float] = []
+        self.frame_types: list[int] = []
+        self.normalization: np.ndarray | None = None
+        self.model_shape: tuple[int, int] | None = None
+        self._finished = False
+        require_project_disk(resource_probe, request.project_root, self.estimated_result)
+
+    @property
+    def finalized_frame_count(self) -> int:
+        return len(self.cameras)
+
+    def accept(self, prediction: Any, canonical: Any, pts_seconds: float) -> None:
+        if self._finished:
+            raise ResultPipelineError("incremental Result sink is already finished")
+        expected = self.finalized_frame_count
+        aligned = self.prediction_decoder(prediction, canonical, pts_seconds)
+        if aligned.frame_index != expected:
+            raise ResultPipelineError("prediction decoder changed or reordered frame identity")
+        if expected >= self.request.frame_count:
+            raise ResultPipelineError("incremental Result received excess predictions")
+        if self.timestamps and aligned.source_pts_seconds <= self.timestamps[-1]:
+            raise ResultPipelineError("incremental Result timestamps are not strictly increasing")
+        validation = replace(aligned, frame_index=0, source_pts_seconds=0.0)
+        height, width = _validate_predictions((validation,), self.request.source_to_model)
+        if self.model_shape is None:
+            self.model_shape = (height, width)
+        elif self.model_shape != (height, width):
+            raise ResultPipelineError("incremental Result model grid changed between frames")
+        estimated_memory = estimate_fixture_memory_bytes(
+            self.request.frame_count,
+            height * width,
+            self.request.profile.import_point_budget,
+        )
+        require_worker_memory(self.resource_probe, estimated_memory)
+        require_project_disk(
+            self.resource_probe, self.request.project_root, self.estimated_result
+        )
+        if self.cancel():
+            raise ResultCancelled("Result construction was cancelled between frames")
+        opencv_c2w = np.linalg.inv(aligned.world_to_camera_opencv)
+        if self.normalization is None:
+            first_blender = opencv_c2w @ _BLENDER_FROM_OPENCV_CAMERA
+            self.normalization = _FIRST_CAMERA_TARGET @ np.linalg.inv(first_blender)
+        retained, statistics = _filter_frame(aligned, self.request.profile)
+        self.filters.append(statistics)
+        rows, columns = np.nonzero(retained)
+        if len(rows):
+            depth = aligned.depth[rows, columns].astype(np.float64, copy=False)
+            intrinsics = aligned.model_intrinsics
+            camera_points = np.column_stack(
+                (
+                    (columns - intrinsics[0, 2]) * depth / intrinsics[0, 0],
+                    (rows - intrinsics[1, 2]) * depth / intrinsics[1, 1],
+                    depth,
+                    np.ones(len(depth), dtype=np.float64),
+                )
+            )
+            world = (self.normalization @ opencv_c2w @ camera_points.T).T[:, :3]
+            for point, row, column in zip(world, rows, columns):
+                self.reducer.add(
+                    PointCandidate(
+                        tuple(float(value) for value in point),
+                        tuple(int(value) for value in aligned.rgb[row, column]),
+                        float(aligned.confidence[row, column]),
+                        expected,
+                        int(row) * width + int(column),
+                    )
+                )
+        source_inverse = np.linalg.inv(self.request.source_to_model)
+        self.cameras.append(
+            np.ascontiguousarray(
+                self.normalization @ opencv_c2w @ _BLENDER_FROM_OPENCV_CAMERA,
+                dtype="<f4",
+            )
+        )
+        self.model_intrinsics.append(
+            np.ascontiguousarray(aligned.model_intrinsics, dtype="<f4")
+        )
+        self.source_intrinsics.append(
+            np.ascontiguousarray(source_inverse @ aligned.model_intrinsics, dtype="<f4")
+        )
+        self.fov.append(
+            (
+                2 * math.atan(width / (2 * float(aligned.model_intrinsics[0, 0]))),
+                2 * math.atan(height / (2 * float(aligned.model_intrinsics[1, 1]))),
+            )
+        )
+        self.timestamps.append(float(aligned.source_pts_seconds))
+        self.frame_types.append(int(aligned.frame_type))
+
+    def finish(self) -> ResultBuildOutcome:
+        if self._finished:
+            raise ResultPipelineError("incremental Result sink finish is not repeatable")
+        self._finished = True
+        if self.finalized_frame_count != self.request.frame_count:
+            raise ResultPipelineError(
+                f"incremental Result finalized {self.finalized_frame_count} of "
+                f"{self.request.frame_count} frames"
+            )
+        reduced = self.reducer.finish()
+        arrays = {
+            "positions": reduced.positions,
+            "colors": reduced.colors,
+            "confidence": reduced.confidence,
+            "radius": reduced.radius,
+            "source_frame": reduced.source_frame,
+            "camera_to_world": np.ascontiguousarray(np.stack(self.cameras), dtype="<f4"),
+            "model_intrinsics": np.ascontiguousarray(np.stack(self.model_intrinsics), dtype="<f4"),
+            "source_intrinsics": np.ascontiguousarray(np.stack(self.source_intrinsics), dtype="<f4"),
+            "model_fov_radians": np.ascontiguousarray(self.fov, dtype="<f4"),
+            "source_pts_seconds": np.ascontiguousarray(self.timestamps, dtype="<f8"),
+            "source_to_model": np.ascontiguousarray(self.request.source_to_model, dtype="<f8"),
+            "frame_type": np.ascontiguousarray(self.frame_types, dtype="|u1"),
+        }
+        profile = {
+            "name": self.request.profile.name,
+            "confidence_cutoff_percent": float(
+                self.request.profile.confidence_cutoff_percent
+            ),
+            "depth_cutoff_percent": float(self.request.profile.depth_cutoff_percent),
+            "import_point_budget": self.request.profile.import_point_budget,
+        }
+        publication = ResultPublication(
+            job_id=self.request.job_id,
+            project_root=self.request.project_root,
+            target_scene=self.request.target_scene,
+            timeline_start=self.request.timeline_start,
+            source=self.request.source,
+            profile=profile,
+            provenance=(
+                self.provenance_factory()
+                if self.provenance_factory is not None
+                else self.request.provenance
+            ),
+            warnings=self.request.warnings,
+            arrays=arrays,
+            voxel_edge_length=reduced.edge_length,
+            voxel_origin=(0.0, 0.0, 0.0),
+            created_utc=self.request.created_utc,
+            result_id=self.request.result_id,
+        )
+
+        def disk_check(remaining: int) -> None:
+            require_project_disk(
+                self.resource_probe, self.request.project_root, remaining
+            )
+
+        published = publish_result_bundle(
+            publication,
+            cancel=self.cancel,
+            disk_check=disk_check,
+            estimated_total_bytes=self.estimated_result,
+        )
+        return ResultBuildOutcome(
+            published,
+            tuple(self.filters),
+            self.reducer.maximum_occupied_entries,
+        )

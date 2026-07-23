@@ -22,6 +22,9 @@ if "bpy" not in sys.modules:
     bpy.utils = SimpleNamespace(register_class=lambda _cls: None, unregister_class=lambda _cls: None)
     props = ModuleType("bpy.props")
     props.BoolProperty = lambda **kwargs: kwargs
+    props.EnumProperty = lambda **kwargs: kwargs
+    props.FloatProperty = lambda **kwargs: kwargs
+    props.IntProperty = lambda **kwargs: kwargs
     props.StringProperty = lambda **kwargs: kwargs
     bpy.props = props
     sys.modules["bpy"] = bpy
@@ -328,6 +331,79 @@ class ProjectBindingTests(unittest.TestCase):
             self.assertEqual(spec["result_fixture"]["size_bytes"], len(b"result fixture identity"))
             self.assertEqual(spec["result_fixture"]["import_point_budget"], 17)
             self.assertEqual(captured["command"][4], "--result-fixture-job")
+
+    def test_reconstruction_launch_freezes_preflight_profile_gpu_model_and_cuda_uuid(self):
+        class FakeProcess:
+            pid = 123
+            stdout = io.BytesIO()
+            def poll(self): return None
+            def kill(self): pass
+            def wait(self, timeout=None): return 0
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            (runtime / "empty-cwd").mkdir(parents=True)
+            python = runtime / "python.exe"
+            python.touch()
+            blend = root / "target.blend"
+            blend.touch()
+            source = root / "capture.mp4"
+            source.write_bytes(b"qualified source")
+            source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            preflight = {
+                "source": {
+                    "absolute_path": str(source), "size_bytes": source.stat().st_size,
+                    "modification_time_ns": source.stat().st_mtime_ns, "sha256": source_hash,
+                },
+                "timing": {"frame_count": 321, "variable_frame_rate": True},
+                "video": {
+                    "stream_index": 0, "displayed_width": 1920, "displayed_height": 1080,
+                    "display_transform": "identity",
+                    "color": {"standard": "bt709", "range": "limited"},
+                },
+            }
+            captured = {}
+            def popen(command, **kwargs):
+                captured["command"] = command
+                captured.update(kwargs)
+                return FakeProcess()
+            controller = JobController()
+            controller._start_threads = lambda _active: None
+            record = WorkerRecord(123, 456, str(python), "a" * 64, "b" * 32)
+            with (
+                mock.patch.object(JOB_LIFECYCLE_MODULE, "_runtime_command", return_value=(runtime, python, "c" * 64, "d" * 64)),
+                mock.patch.object(JOB_LIFECYCLE_MODULE, "_wait_for_worker_record", return_value=record),
+                mock.patch.object(JOB_LIFECYCLE_MODULE.subprocess, "Popen", side_effect=popen),
+            ):
+                job_id = controller.launch_reconstruction(
+                    managed_root=root, blend_path=blend,
+                    scene_uuid="12345678-1234-1234-1234-123456789abc",
+                    scene_name="Scene", timeline_start=4,
+                    capture_draft_path="//capture.mp4",
+                    profile_name="Custom", camera_iterations=2,
+                    confidence_cutoff_percent=42, depth_cutoff_percent=100,
+                    import_point_budget=11_000_000, point_budget_confirmed=True,
+                    gpu={
+                        "uuid": "GPU-12345678", "name": "Ada", "total_memory": 24_000,
+                        "driver_version": "999", "compute_capability": (8, 9),
+                    },
+                    capability_profile_name="Balanced",
+                    capability_profile_settings_sha256="e" * 64,
+                    model={
+                        "catalog_version": "1.0.0", "id": "lingbot-map-long",
+                        "path": str(root / "model.pt"), "sha256": "f" * 64,
+                    },
+                    preflight_result=preflight,
+                )
+            spec = read_json(project_result_root(blend) / ".jobs" / job_id / "job-spec.json")
+            reconstruction = spec["reconstruction"]
+            self.assertEqual(reconstruction["preflight"]["frame_count"], 321)
+            self.assertEqual(reconstruction["profile"]["name"], "Custom")
+            self.assertTrue(reconstruction["profile"]["point_budget_confirmed"])
+            self.assertEqual(reconstruction["source"]["sha256"], source_hash)
+            self.assertEqual(captured["command"][4], "--reconstruction-job")
+            self.assertEqual(captured["env"]["CUDA_VISIBLE_DEVICES"], "GPU-12345678")
 
     def test_results_panel_discovery_only_returns_complete_matching_publications(self):
         with tempfile.TemporaryDirectory() as temporary:
