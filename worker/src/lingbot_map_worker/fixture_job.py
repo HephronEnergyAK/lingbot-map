@@ -27,8 +27,8 @@ from .ipc import (
 )
 
 
-JOB_FIELDS = {
-    "schema_version", "job_id", "target_scene", "timeline_start", "project_root", "fixture"
+COMMON_JOB_FIELDS = {
+    "schema_version", "job_id", "target_scene", "timeline_start", "project_root"
 }
 CONTROL_FIELDS = {
     "schema_version", "job_id", "job_spec", "runtime_id", "worker",
@@ -83,7 +83,12 @@ def _target(value: Any) -> dict[str, Any]:
 
 
 def validate_job_spec(value: Any) -> dict[str, Any]:
-    job = require_schema(value, JOB_FIELDS, label="JobSpec")
+    if not isinstance(value, dict):
+        raise IpcError("JobSpec has unknown or missing fields")
+    job_kinds = {name for name in ("fixture", "capture_source") if name in value}
+    if len(job_kinds) != 1 or set(value) != COMMON_JOB_FIELDS | job_kinds:
+        raise IpcError("JobSpec must contain exactly one supported Job kind")
+    job = require_schema(value, COMMON_JOB_FIELDS | job_kinds, label="JobSpec")
     if not re.fullmatch(r"job-[0-9a-f]{32}", require_text(job["job_id"], label="job_id", maximum=64)):
         raise IpcError("JobSpec Job ID is invalid")
     _target(job["target_scene"])
@@ -91,19 +96,38 @@ def validate_job_spec(value: Any) -> dict[str, Any]:
     root = Path(require_text(job["project_root"], label="project_root", maximum=32767))
     if not root.is_absolute():
         raise IpcError("Project Result Root must be absolute")
-    fixture = require_exact_object(
-        job["fixture"],
-        {"steps", "step_delay_seconds", "ignore_cancel", "heartbeat_interval_seconds", "freeze_heartbeat_after_sequence"},
-        label="fixture",
-    )
-    _integer(fixture["steps"], "fixture.steps", 1, 100000)
-    _finite(fixture["step_delay_seconds"], "fixture.step_delay_seconds", 0, 60)
-    if not isinstance(fixture["ignore_cancel"], bool):
-        raise IpcError("fixture.ignore_cancel is invalid")
-    _finite(fixture["heartbeat_interval_seconds"], "fixture.heartbeat_interval_seconds", 0.001, 5)
-    freeze = fixture["freeze_heartbeat_after_sequence"]
-    if freeze is not None:
-        _integer(freeze, "fixture.freeze_heartbeat_after_sequence", 1)
+    if "fixture" in job:
+        fixture = require_exact_object(
+            job["fixture"],
+            {"steps", "step_delay_seconds", "ignore_cancel", "heartbeat_interval_seconds", "freeze_heartbeat_after_sequence"},
+            label="fixture",
+        )
+        _integer(fixture["steps"], "fixture.steps", 1, 100000)
+        _finite(fixture["step_delay_seconds"], "fixture.step_delay_seconds", 0, 60)
+        if not isinstance(fixture["ignore_cancel"], bool):
+            raise IpcError("fixture.ignore_cancel is invalid")
+        _finite(fixture["heartbeat_interval_seconds"], "fixture.heartbeat_interval_seconds", 0.001, 5)
+        freeze = fixture["freeze_heartbeat_after_sequence"]
+        if freeze is not None:
+            _integer(freeze, "fixture.freeze_heartbeat_after_sequence", 1)
+    else:
+        capture = require_exact_object(
+            job["capture_source"],
+            {"draft_path", "absolute_path", "scene_relative_path", "size_bytes", "modification_time_ns"},
+            label="capture_source",
+        )
+        require_text(capture["draft_path"], label="capture_source.draft_path", maximum=32767)
+        absolute = Path(require_text(capture["absolute_path"], label="capture_source.absolute_path", maximum=32767))
+        if not absolute.is_absolute() or absolute.suffix.lower() not in {".mp4", ".mov"}:
+            raise IpcError("Capture Source absolute path is invalid")
+        relative = capture["scene_relative_path"]
+        if relative is not None and (
+            not isinstance(relative, str) or not relative.startswith("//")
+            or len(relative.encode("utf-8")) > 32767
+        ):
+            raise IpcError("Capture Source scene-relative path is invalid")
+        _integer(capture["size_bytes"], "capture_source.size_bytes", 1)
+        _integer(capture["modification_time_ns"], "capture_source.modification_time_ns", 1)
     return job
 
 
@@ -316,6 +340,8 @@ def run_fixture_job(spec_path: Path, nonce: str) -> int:
         raise FixtureJobError("Fixture JobSpec must be an absolute job-spec.json path")
     job_dir = spec_path.parent
     job = validate_job_spec(read_json(spec_path))
+    if "fixture" not in job:
+        raise FixtureJobError("Fixture runner requires a fixture JobSpec")
     if job_dir.name != job["job_id"] or job_dir.parent.name != ".jobs":
         raise FixtureJobError("Fixture JobSpec is outside its bounded active directory")
     if Path(os.path.abspath(job["project_root"])) != job_dir.parent.parent:

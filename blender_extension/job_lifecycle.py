@@ -28,6 +28,7 @@ from .runtime_setup import RuntimeSetupError, process_identity, sha256_file
 
 
 SCENE_UUID_PROPERTY = "lingbot_map_scene_uuid"
+CAPTURE_SOURCE_PROPERTY = "lingbot_map_capture_source"
 JOB_ID = re.compile(r"job-[0-9a-f]{32}\Z")
 TERMINAL_STATES = {"succeeded", "cancelled", "failed"}
 MAX_ACTIVE_ENTRIES = 32
@@ -89,6 +90,36 @@ def normalized_blend_path(value: str | Path) -> Path:
     if not path.is_absolute() or path.suffix.lower() != ".blend":
         raise JobLifecycleError("Target Scene requires an absolute saved .blend path")
     return path
+
+
+def normalized_capture_source(value: str | Path, blend_path: str | Path) -> Path:
+    text = str(value).strip()
+    if not text:
+        raise JobLifecycleError("Choose one Capture Source before launching preflight")
+    blend = normalized_blend_path(blend_path)
+    if text.startswith("//"):
+        text = str(blend.parent / Path(text[2:].replace("/", os.sep)))
+    source = Path(os.path.abspath(text))
+    if not source.is_absolute() or source.suffix.lower() not in {".mp4", ".mov"}:
+        raise JobLifecycleError("Capture Source must be one local MP4 or MOV file")
+    if not source.is_file() or source.is_symlink() or is_reparse_point(source):
+        raise JobLifecycleError("Capture Source is absent or not an ordinary local file")
+    return source
+
+
+def scene_relative_capture_path(source: str | Path, blend_path: str | Path) -> str | None:
+    absolute = Path(os.path.abspath(source))
+    blend = normalized_blend_path(blend_path)
+    try:
+        relative = os.path.relpath(absolute, blend.parent)
+    except ValueError:  # Different Windows drive: no scene-relative identity exists.
+        return None
+    return "//" + relative.replace(os.sep, "/")
+
+
+def capture_source_draft_path(source: str | Path, blend_path: str | Path) -> str:
+    absolute = normalized_capture_source(source, blend_path)
+    return scene_relative_capture_path(absolute, blend_path) or str(absolute)
 
 
 def project_result_root(blend_path: str | Path) -> Path:
@@ -428,13 +459,88 @@ class JobController:
                 "freeze_heartbeat_after_sequence": freeze_heartbeat_after_sequence,
             },
         }
+        return self._launch_spec(
+            runtime=runtime, python=python, runtime_id=runtime_id,
+            trusted_cwd=trusted_cwd, job_dir=job_dir, job_spec=job_spec,
+            worker_argument="--fixture-job", target=target,
+            scene_uuid=scene_uuid, starting_message="Fixture Job is starting",
+        )
+
+    def launch_preflight(
+        self,
+        *,
+        managed_root: Path,
+        blend_path: str | Path,
+        scene_uuid: str,
+        scene_name: str,
+        timeline_start: int,
+        capture_draft_path: str,
+    ) -> str:
+        if self.has_active_job():
+            raise JobLifecycleError("This Blender process already launched an active Worker")
+        target = normalized_blend_path(blend_path)
+        if not target.is_file():
+            raise JobLifecycleError("Target Scene .blend file does not exist on disk")
+        source = normalized_capture_source(capture_draft_path, target)
+        frozen_stat = source.stat()
+        if frozen_stat.st_size < 1:
+            raise JobLifecycleError("Capture Source is empty")
+        root = ensure_project_layout(target)
+        if _active_children(root):
+            raise JobLifecycleError("This Project Result Root already contains an active Job")
+        runtime, python, runtime_id, _lock_sha = _runtime_command(managed_root)
+        trusted_cwd = runtime / "empty-cwd"
+        if not trusted_cwd.is_dir() or trusted_cwd.is_symlink() or any(trusted_cwd.iterdir()):
+            raise JobLifecycleError("Worker Runtime trusted working directory is absent or not empty")
+        job_id = f"job-{uuid.uuid4().hex}"
+        job_dir = root / ".jobs" / job_id
+        job_dir.mkdir()
+        target_scene = {
+            "blend_path": str(target), "scene_uuid": str(uuid.UUID(scene_uuid)), "scene_name": scene_name,
+        }
+        relative = scene_relative_capture_path(source, target)
+        job_spec = {
+            "schema_version": SCHEMA_VERSION, "job_id": job_id,
+            "target_scene": target_scene, "timeline_start": int(timeline_start),
+            "project_root": str(root),
+            "capture_source": {
+                "draft_path": capture_draft_path,
+                "absolute_path": str(source),
+                "scene_relative_path": relative,
+                "size_bytes": int(frozen_stat.st_size),
+                "modification_time_ns": int(frozen_stat.st_mtime_ns),
+            },
+        }
+        return self._launch_spec(
+            runtime=runtime, python=python, runtime_id=runtime_id,
+            trusted_cwd=trusted_cwd, job_dir=job_dir, job_spec=job_spec,
+            worker_argument="--preflight-job", target=target,
+            scene_uuid=scene_uuid, starting_message="Capture Source preflight is starting",
+        )
+
+    def _launch_spec(
+        self,
+        *,
+        runtime: Path,
+        python: Path,
+        runtime_id: str,
+        trusted_cwd: Path,
+        job_dir: Path,
+        job_spec: dict[str, Any],
+        worker_argument: str,
+        target: Path,
+        scene_uuid: str,
+        starting_message: str,
+    ) -> str:
+        job_id = str(job_spec["job_id"])
+        target_scene = job_spec["target_scene"]
         spec_path = job_dir / "job-spec.json"
         atomic_write_json(spec_path, job_spec)
         nonce = uuid.uuid4().hex
         process = None
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
         process = subprocess.Popen(
-            [str(python), "-I", "-m", "lingbot_map_worker", "--fixture-job", str(spec_path), "--job-nonce", nonce],
+            [str(python), "-I", "-m", "lingbot_map_worker", worker_argument, str(spec_path), "--job-nonce", nonce],
             cwd=trusted_cwd,
             env=_worker_environment(),
             stdin=subprocess.DEVNULL,
@@ -469,7 +575,7 @@ class JobController:
         )
         with self._lock:
             self._active = active
-            self._snapshot = JobSnapshot("starting", "Fixture Job is starting", job_id, str(target), scene_uuid, "starting", location=str(job_dir))
+            self._snapshot = JobSnapshot("starting", starting_message, job_id, str(target), scene_uuid, "starting", location=str(job_dir))
         self._start_threads(active)
         return job_id
 
@@ -542,11 +648,11 @@ class JobController:
                             self._publish(self._snapshot_from_status(status, "reconnecting", "Waiting for a newly observed heartbeat", active))
                             continue
                     if status["state"] in TERMINAL_STATES:
-                        self._publish(self._snapshot_from_status(status, status["state"], f"Fixture Job {status['state']}", active))
+                        self._publish(self._snapshot_from_status(status, status["state"], f"Job {status['state']}", active))
                     elif now - active.last_heartbeat_observed >= self.heartbeat_window:
                         self._publish(self._snapshot_from_status(status, "unresponsive", "Worker heartbeat was not observed within the liveness window", active))
                     else:
-                        self._publish(self._snapshot_from_status(status, status["state"], f"Fixture Job {status['state']}", active))
+                        self._publish(self._snapshot_from_status(status, status["state"], f"Job {status['state']}", active))
             if active.cancel_started is not None and now - active.cancel_started >= self.cancel_grace:
                 observed = _observed_record(active.record)
                 if not _same_worker(active.record, observed):
@@ -585,7 +691,7 @@ class JobController:
                 directory, _record_from_control(control), None,
                 target["blend_path"], target["scene_uuid"],
             )
-            snapshot = self._snapshot_from_status(status, status["state"], f"Fixture Job {status['state']}", active)
+            snapshot = self._snapshot_from_status(status, status["state"], f"Job {status['state']}", active)
             self._publish(JobSnapshot(**{**asdict(snapshot), "location": str(directory)}))
 
     @staticmethod
@@ -638,7 +744,7 @@ class JobController:
         matches = [
             item for item in diagnostics.iterdir()
             if item.is_dir() and not item.is_symlink() and not is_reparse_point(item)
-            and item.name.startswith(f"{job_dir.name}--fixture-")
+            and item.name.startswith(f"{job_dir.name}--")
         ]
         return matches[0] if len(matches) == 1 else None
 
@@ -754,6 +860,10 @@ def get_job_snapshot() -> JobSnapshot:
 
 def start_fixture_job(**kwargs) -> str:
     return _controller.launch_fixture(**kwargs)
+
+
+def start_preflight_job(**kwargs) -> str:
+    return _controller.launch_preflight(**kwargs)
 
 
 def cancel_active_job() -> bool:

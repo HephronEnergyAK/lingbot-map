@@ -17,7 +17,13 @@
       "id": "job-spec",
       "version": "1.0.0",
       "path": "job-spec.schema.json",
-      "sha256": "5854d6ace221903838214f142cb896e4b2c32a785031149edfb69f3a57219f72"
+      "sha256": "6762850f8e12d8488f2900ba2ca817acc745ab6e8ff4995ab09d72276aa6f4c2"
+    },
+    {
+      "id": "preflight-result",
+      "version": "1.0.0",
+      "path": "preflight-result.schema.json",
+      "sha256": "c859a16cedd5605f14a878e355117576cd9fb9ca31a06866f1e6ba992fa21b8c"
     },
     {
       "id": "job-control",

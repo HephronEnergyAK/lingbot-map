@@ -4,6 +4,7 @@
   "python": "3.10.20",
   "packages": [
     {"name": "anyio", "version": "4.14.2"},
+    {"name": "av", "version": "17.1.0"},
     {"name": "certifi", "version": "2026.7.22"},
     {"name": "click", "version": "8.4.2"},
     {"name": "colorama", "version": "0.4.6"},

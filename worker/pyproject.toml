@@ -9,6 +9,7 @@ description = "Headless Reconstruction Worker for LingBot Map Reconstruction"
 requires-python = "==3.10.20"
 license = "Apache-2.0"
 dependencies = [
+    "av==17.1.0",
     "lingbot-map==0.1.0",
     "nvidia-ml-py==13.610.43",
     "torch==2.11.0",

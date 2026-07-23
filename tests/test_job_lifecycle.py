@@ -38,9 +38,11 @@ from blender_extension.ipc import (
 from blender_extension.job_lifecycle import (
     JobController,
     JobLifecycleError,
+    capture_source_draft_path,
     ensure_project_layout,
     ensure_unique_scene_uuid,
     project_result_root,
+    scene_relative_capture_path,
     validate_control,
     validate_status,
     WorkerRecord,
@@ -157,9 +159,9 @@ class ProjectBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(IpcError, "newline-terminated"):
                 JobController._validate_complete_events(path, "job-" + "a" * 32)
 
-    def test_all_four_schema_contracts_begin_at_1_0_0(self):
+    def test_all_job_schema_contracts_begin_at_1_0_0(self):
         root = Path(__file__).resolve().parents[1]
-        names = ("job-spec", "job-control", "job-event", "job-status")
+        names = ("job-spec", "job-control", "job-event", "job-status", "preflight-result")
         for name in names:
             document = json.loads((root / "schemas" / f"{name}.schema.json").read_text(encoding="utf-8"))
             self.assertEqual(document["properties"]["schema_version"]["const"], "1.0.0")
@@ -223,6 +225,58 @@ class ProjectBindingTests(unittest.TestCase):
                 self.assertNotIn(forbidden, environment)
             self.assertEqual(environment["PYTHONNOUSERSITE"], "1")
             self.assertEqual(environment["HF_HUB_OFFLINE"], "1")
+
+    def test_capture_draft_is_relative_and_preflight_launch_freezes_both_identities(self):
+        class FakeProcess:
+            pid = 123
+            stdout = io.BytesIO()
+            def poll(self):
+                return None
+            def kill(self):
+                pass
+            def wait(self, timeout=None):
+                return 0
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            (runtime / "empty-cwd").mkdir(parents=True)
+            python = runtime / "python.exe"
+            python.touch()
+            blend = root / "target.blend"
+            blend.touch()
+            source = root / "capture.mp4"
+            source.write_bytes(b"eight presentation frames")
+            draft = capture_source_draft_path(source, blend)
+            self.assertEqual(draft, "//capture.mp4")
+            self.assertEqual(scene_relative_capture_path(source, blend), draft)
+            captured = {}
+            def popen(command, **kwargs):
+                captured["command"] = command
+                return FakeProcess()
+            controller = JobController()
+            controller._start_threads = lambda _active: None
+            record = WorkerRecord(123, 456, str(python), "a" * 64, "b" * 32)
+            with (
+                mock.patch.object(JOB_LIFECYCLE_MODULE, "_runtime_command", return_value=(runtime, python, "c" * 64, "d" * 64)),
+                mock.patch.object(JOB_LIFECYCLE_MODULE, "_wait_for_worker_record", return_value=record),
+                mock.patch.object(JOB_LIFECYCLE_MODULE.subprocess, "Popen", side_effect=popen),
+            ):
+                job_id = controller.launch_preflight(
+                    managed_root=root, blend_path=blend,
+                    scene_uuid="12345678-1234-1234-1234-123456789abc",
+                    scene_name="Scene", timeline_start=17,
+                    capture_draft_path=draft,
+                )
+            spec_path = project_result_root(blend) / ".jobs" / job_id / "job-spec.json"
+            frozen = read_json(spec_path)["capture_source"]
+            self.assertEqual(frozen["draft_path"], draft)
+            self.assertEqual(frozen["absolute_path"], str(source))
+            self.assertEqual(frozen["scene_relative_path"], draft)
+            self.assertEqual(frozen["size_bytes"], source.stat().st_size)
+            self.assertEqual(captured["command"][4], "--preflight-job")
+            source.write_bytes(b"replacement")
+            self.assertEqual(read_json(spec_path)["capture_source"], frozen)
 
 
 if __name__ == "__main__":

@@ -25,11 +25,14 @@ from .gpu_capability import (
     start_gpu_capability,
 )
 from .job_lifecycle import (
+    CAPTURE_SOURCE_PROPERTY,
     JobLifecycleError,
     cancel_active_job,
+    capture_source_draft_path,
     ensure_unique_scene_uuid,
     get_job_snapshot,
     start_fixture_job,
+    start_preflight_job,
 )
 
 
@@ -263,6 +266,81 @@ class LINGBOTMAP_OT_run_fixture_job(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class LINGBOTMAP_OT_select_capture_source(bpy.types.Operator):
+    bl_idname = "lingbot_map.select_capture_source"
+    bl_label = "Choose Capture Source"
+    bl_description = "Choose one local MP4 or MOV and store a scene-relative path when representable"
+
+    filepath: StringProperty(name="Capture Source", subtype="FILE_PATH", default="")
+    filter_glob: StringProperty(default="*.mp4;*.mov", options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        current = str(getattr(context.scene, CAPTURE_SOURCE_PROPERTY, "")).strip()
+        if current and bpy.data.filepath:
+            try:
+                self.filepath = str(
+                    capture_source_draft_path(current, bpy.data.filepath)
+                )
+            except JobLifecycleError:
+                pass
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        try:
+            if not bpy.data.filepath:
+                raise JobLifecycleError("Save the Blender file before choosing a Capture Source")
+            draft = capture_source_draft_path(self.filepath, bpy.data.filepath)
+            setattr(context.scene, CAPTURE_SOURCE_PROPERTY, draft)
+        except JobLifecycleError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_run_preflight_job(bpy.types.Operator):
+    bl_idname = "lingbot_map.run_preflight_job"
+    bl_label = "Preflight Capture Source"
+    bl_description = "Decode and validate every presentation frame without retaining pixels"
+
+    @classmethod
+    def poll(cls, context):
+        decision = get_host_decision()
+        capture = str(getattr(getattr(context, "scene", None), CAPTURE_SOURCE_PROPERTY, "")).strip()
+        return bool(decision and decision.supported and capture and get_job_snapshot().state not in {
+            "starting", "running", "reconnecting", "unresponsive", "cancelling"
+        })
+
+    def execute(self, context):
+        try:
+            blend_path = bpy.data.filepath
+            if not blend_path:
+                raise JobLifecycleError("Save the Blender file before launching a Job")
+            entered_draft = str(getattr(context.scene, CAPTURE_SOURCE_PROPERTY, ""))
+            normalized_draft = capture_source_draft_path(entered_draft, blend_path)
+            if normalized_draft != entered_draft:
+                setattr(context.scene, CAPTURE_SOURCE_PROPERTY, normalized_draft)
+                raise JobLifecycleError(
+                    "Capture Source was normalized for this Scene. Save the .blend, then launch the Job again."
+                )
+            scene_uuid = ensure_unique_scene_uuid(context.scene, tuple(bpy.data.scenes))
+            if bpy.data.is_dirty:
+                raise JobLifecycleError("Save the .blend after its Scene UUID or other changes before launch")
+            preferences = _preferences(context)
+            start_preflight_job(
+                managed_root=_managed_root(preferences),
+                blend_path=blend_path,
+                scene_uuid=scene_uuid,
+                scene_name=context.scene.name,
+                timeline_start=context.scene.frame_current,
+                capture_draft_path=normalized_draft,
+            )
+        except (JobLifecycleError, ValueError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
 class LINGBOTMAP_OT_cancel_active_job(bpy.types.Operator):
     bl_idname = "lingbot_map.cancel_active_job"
     bl_label = "Cancel Active Job"
@@ -393,14 +471,16 @@ class LINGBOTMAP_PT_reconstruct(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
     bl_label = "Reconstruct"
     bl_order = 1
 
-    def draw(self, _context):
+    def draw(self, context):
         decision = get_host_decision()
         layout = self.layout
         layout.label(text="Configure one Capture Source and Reconstruction Profile")
+        layout.prop(context.scene, CAPTURE_SOURCE_PROPERTY, text="Capture Source")
+        layout.operator(LINGBOTMAP_OT_select_capture_source.bl_idname)
         row = layout.row()
         row.enabled = bool(decision and decision.supported)
-        row.operator(LINGBOTMAP_OT_run_fixture_job.bl_idname)
-        layout.label(text="Fixture runs the complete lifecycle without neural inference")
+        row.operator(LINGBOTMAP_OT_run_preflight_job.bl_idname)
+        layout.label(text="Preflight examines every frame without changing Scene FPS")
 
 
 class LINGBOTMAP_PT_active_job(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
@@ -451,6 +531,8 @@ CLASSES = (
     LINGBOTMAP_OT_test_gpu_profiles,
     LINGBOTMAP_OT_cancel_gpu_profiles,
     LINGBOTMAP_OT_run_fixture_job,
+    LINGBOTMAP_OT_select_capture_source,
+    LINGBOTMAP_OT_run_preflight_job,
     LINGBOTMAP_OT_cancel_active_job,
     LINGBOTMAP_PT_setup,
     LINGBOTMAP_PT_reconstruct,

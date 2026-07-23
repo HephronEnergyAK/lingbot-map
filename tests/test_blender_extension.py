@@ -272,6 +272,8 @@ class RegistrationTests(unittest.TestCase):
                 "lingbot_map.test_gpu_profiles",
                 "lingbot_map.cancel_gpu_profiles",
                 "lingbot_map.run_fixture_job",
+                "lingbot_map.select_capture_source",
+                "lingbot_map.run_preflight_job",
                 "lingbot_map.cancel_active_job",
             ],
         )

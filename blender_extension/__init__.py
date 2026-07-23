@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bpy
+from bpy.props import StringProperty
 
 from .host import probe_supported_host
 from .runtime import (
@@ -15,6 +16,7 @@ from .runtime import (
 from .ui import CLASSES
 from .gpu_capability import shutdown_gpu_capability
 from .job_lifecycle import (
+    CAPTURE_SOURCE_PROPERTY,
     detach_job_monitor,
     recover_jobs_for_blend,
     report_job_recovery_error,
@@ -60,6 +62,17 @@ def register() -> None:
         for extension_class in CLASSES:
             bpy.utils.register_class(extension_class)
             _registered_classes.append(extension_class)
+        scene_type = getattr(bpy.types, "Scene", None)
+        if scene_type is not None and not hasattr(scene_type, CAPTURE_SOURCE_PROPERTY):
+            setattr(
+                scene_type,
+                CAPTURE_SOURCE_PROPERTY,
+                StringProperty(
+                    name="Capture Source",
+                    description="Scene-owned MP4 or MOV Job Draft path",
+                    default="",
+                ),
+            )
         handlers = getattr(bpy.app, "handlers", None)
         timers = getattr(bpy.app, "timers", None)
         if handlers is not None and _recover_jobs_after_load not in handlers.load_post:
@@ -69,6 +82,7 @@ def register() -> None:
         if hasattr(bpy, "data"):
             _recover_jobs_after_load(None)
     except Exception:
+        _unregister_scene_property()
         _unregister_classes()
         clear_host_decision()
         raise
@@ -81,6 +95,7 @@ def unregister() -> None:
     cancel_model_setup()
     shutdown_gpu_capability()
     detach_job_monitor()
+    _unregister_scene_property()
     handlers = getattr(bpy.app, "handlers", None)
     timers = getattr(bpy.app, "timers", None)
     if handlers is not None and _recover_jobs_after_load in handlers.load_post:
@@ -102,6 +117,12 @@ def _unregister_classes() -> None:
                 first_error = exc
     if first_error is not None:
         raise first_error
+
+
+def _unregister_scene_property() -> None:
+    scene_type = getattr(bpy.types, "Scene", None)
+    if scene_type is not None and hasattr(scene_type, CAPTURE_SOURCE_PROPERTY):
+        delattr(scene_type, CAPTURE_SOURCE_PROPERTY)
 
 
 __all__ = ["get_host_decision", "register", "unregister"]
