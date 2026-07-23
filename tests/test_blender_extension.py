@@ -28,6 +28,28 @@ class FakeRegistration:
         self.unregistered.append(extension_class)
 
 
+class FakeLayout:
+    def __init__(self, events=None):
+        self.events = events if events is not None else []
+        self.enabled = True
+
+    def label(self, *, text, **_kwargs):
+        self.events.append(("label", text))
+
+    def operator(self, operator_id, *, text=None, **_kwargs):
+        self.events.append(("operator", operator_id, text))
+        return SimpleNamespace()
+
+    def separator(self):
+        self.events.append(("separator",))
+
+    def box(self):
+        return FakeLayout(self.events)
+
+    def row(self, **_kwargs):
+        return FakeLayout(self.events)
+
+
 def install_fake_bpy(version=(5, 2, 1)):
     registration = FakeRegistration()
     bpy = ModuleType("bpy")
@@ -94,6 +116,7 @@ class BlenderExtensionManifestTests(unittest.TestCase):
                 self.assertIn("__init__.py", names)
                 self.assertIn("LICENSE.txt", names)
                 self.assertNotIn("lingbot_map/model_adapter.py", names)
+                self.assertFalse(any(name.endswith((".pt", ".pth", ".onnx")) for name in names))
 
     def test_extension_never_imports_worker_or_model_core(self):
         forbidden = []
@@ -232,13 +255,19 @@ class RegistrationTests(unittest.TestCase):
     def test_lifecycle_panels_are_ordered_and_machine_settings_stay_in_preferences(self):
         classes = self.extension.CLASSES
         preferences = classes[0]
-        operators = classes[1:3]
-        panels = classes[3:]
+        operators = classes[1:-5]
+        panels = classes[-5:]
 
         self.assertEqual(preferences.__name__, "LINGBOTMAP_Preferences")
         self.assertEqual(
             [operator.bl_idname for operator in operators],
-            ["lingbot_map.setup_runtime", "lingbot_map.cancel_runtime_setup"],
+            [
+                "lingbot_map.setup_runtime",
+                "lingbot_map.cancel_runtime_setup",
+                "lingbot_map.download_model",
+                "lingbot_map.import_model",
+                "lingbot_map.cancel_model_setup",
+            ],
         )
         self.assertEqual([panel.bl_order for panel in panels], [0, 1, 2, 3, 4])
         self.assertEqual(
@@ -250,6 +279,35 @@ class RegistrationTests(unittest.TestCase):
         self.assertTrue(all(panel.bl_category == "LingBot Map" for panel in panels))
         annotations = preferences.__annotations__
         self.assertEqual(set(annotations), {"runtime_root", "gpu_uuid", "offline_setup"})
+
+    def test_setup_panel_shows_model_source_license_checksum_and_size_before_actions(self):
+        with mock.patch.object(
+            self.extension, "probe_supported_host", return_value=self.supported_decision()
+        ):
+            self.extension.register()
+        setup_panel_class = next(
+            item for item in self.extension.CLASSES if item.__name__ == "LINGBOTMAP_PT_setup"
+        )
+        panel = setup_panel_class()
+        panel.layout = FakeLayout()
+        preferences = SimpleNamespace(runtime_root="", offline_setup=True)
+        context = SimpleNamespace(
+            preferences=SimpleNamespace(
+                addons={"blender_extension": SimpleNamespace(preferences=preferences)}
+            )
+        )
+        with mock.patch.dict("os.environ", {"LOCALAPPDATA": str(ROOT / ".test-local-app-data")}):
+            panel.draw(context)
+        labels = [event[1] for event in panel.layout.events if event[0] == "label"]
+        operators = [event[1] for event in panel.layout.events if event[0] == "operator"]
+        self.assertTrue(any("robbyant/lingbot-map" in label for label in labels))
+        self.assertTrue(any("JianyuanWang/skyseg" in label for label in labels))
+        self.assertTrue(any("Apache-2.0 (pending-weight-specific-confirmation)" in label for label in labels))
+        self.assertTrue(any("MIT (pending-weight-specific-confirmation)" in label for label in labels))
+        self.assertTrue(any("832bc82cbae0bc9b" in label for label in labels))
+        self.assertTrue(any("ab9c34c64c3d8212" in label for label in labels))
+        self.assertEqual(operators.count("lingbot_map.download_model"), 2)
+        self.assertEqual(operators.count("lingbot_map.import_model"), 2)
 
 
 if __name__ == "__main__":

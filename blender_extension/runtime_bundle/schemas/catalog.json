@@ -6,6 +6,12 @@
       "version": "1.0.0",
       "path": "runtime-identity.schema.json",
       "sha256": "a1b23a25008d33d1a485ce130321080b4463d6113add0342b8fe538f7d51b219"
+    },
+    {
+      "id": "model-catalog",
+      "version": "1.0.0",
+      "path": "model-catalog.schema.json",
+      "sha256": "33c7633cf300bbece893fae137135b987e07afb3c72ef7bfc2e5ff262d3a9b26"
     }
   ]
 }

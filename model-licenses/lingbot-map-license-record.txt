@@ -1,0 +1,20 @@
+Model License Record: LingBot-Map long weights
+
+Evidence status: PENDING WEIGHT-SPECIFIC CONFIRMATION
+Catalog SPDX expression: Apache-2.0 (upstream project claim; not yet proven to
+cover the weight file)
+
+Weight repository: https://huggingface.co/robbyant/lingbot-map
+Immutable revision: 204754b72bb24f561f8d7e7e1e4e4cd9e809adf9
+Weight filename: lingbot-map-long.pt
+Attribution source: Robbyant Team and the authors listed in the model card.
+
+Captured statement at the immutable revision:
+"This project is released under the Apache License 2.0. See LICENSE file for
+details."
+
+The model repository has no LICENSE file at this revision and has no formal
+license metadata. The captured Apache-2.0 text is the LingBot-Map source-code
+license. These facts do not establish that Apache-2.0 covers this exact weight
+file. Engineering 0.1.0 may use the catalogued checksum for development, but
+1.0.0 remains blocked pending attributable weight-specific confirmation.

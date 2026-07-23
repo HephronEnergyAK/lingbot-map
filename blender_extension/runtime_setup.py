@@ -133,6 +133,7 @@ class RuntimeBundle:
         "wheels/*.whl",
         "schemas/**/*.json",
         "model-catalog.json",
+        "model-licenses/*",
         "LICENSES/*",
         "NOTICES/*",
     )

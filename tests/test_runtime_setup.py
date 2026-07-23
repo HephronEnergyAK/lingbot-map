@@ -106,6 +106,7 @@ class RuntimeFixture:
             "wheels/lingbot_map_worker-0.1.0-py3-none-any.whl": "wheel",
             "schemas/catalog.json": "{}",
             "model-catalog.json": "{}",
+            "model-licenses/model-license.txt": "model license",
             "LICENSES/Apache-2.0.txt": "license",
             "NOTICES/worker.txt": "notice",
         }
@@ -150,6 +151,7 @@ class RuntimeIdentityTests(unittest.TestCase):
                     "artifact-catalog.json", "pyproject.toml", "uv.lock",
                     "wheels/lingbot_map_worker-0.1.0-py3-none-any.whl",
                     "schemas/catalog.json", "model-catalog.json",
+                    "model-licenses/model-license.txt",
                     "LICENSES/Apache-2.0.txt", "NOTICES/worker.txt",
                 }.issubset(paths)
             )

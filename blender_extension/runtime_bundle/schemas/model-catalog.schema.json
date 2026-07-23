@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lingbot-map.invalid/schemas/model-catalog-1.0.0.json",
+  "title": "LingBot Map Model Catalog",
+  "type": "object",
+  "required": ["catalog_version", "models"],
+  "properties": {
+    "catalog_version": { "const": "1.0.0" },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/model" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "model": {
+      "type": "object",
+      "required": ["id", "display_name", "role", "required", "architecture", "input_contract", "serialization", "artifact", "license_record"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+        "display_name": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["reconstruction", "auxiliary"] },
+        "required": { "type": "boolean" },
+        "architecture": { "type": "string", "minLength": 1 },
+        "input_contract": { "type": "object", "minProperties": 1 },
+        "serialization": {
+          "type": "object",
+          "required": ["format", "load_policy", "arbitrary_pickle_allowed"],
+          "properties": {
+            "format": { "enum": ["pytorch-zip-checkpoint", "onnx"] },
+            "load_policy": { "type": "string", "minLength": 1 },
+            "arbitrary_pickle_allowed": { "const": false }
+          },
+          "additionalProperties": false
+        },
+        "artifact": {
+          "type": "object",
+          "required": ["filename", "length", "sha256", "url", "source_repository", "source_revision"],
+          "properties": {
+            "filename": { "type": "string", "minLength": 1 },
+            "length": { "type": "integer", "minimum": 1 },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "url": { "type": "string", "pattern": "^https://" },
+            "source_repository": { "type": "string", "pattern": "^https://" },
+            "source_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+          },
+          "additionalProperties": false
+        },
+        "license_record": {
+          "type": "object",
+          "required": ["status", "spdx_expression", "covers_weights", "captured_license_text_path", "captured_license_text_sha256", "record_path", "record_sha256", "copyright_or_attribution_source", "evidence_basis", "release_gate"],
+          "properties": {
+            "status": { "type": "string", "minLength": 1 },
+            "spdx_expression": { "type": "string", "minLength": 1 },
+            "covers_weights": { "type": "boolean" },
+            "captured_license_text_path": { "type": "string", "pattern": "^model-licenses/" },
+            "captured_license_text_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "record_path": { "type": "string", "pattern": "^model-licenses/" },
+            "record_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "copyright_or_attribution_source": { "type": "string", "minLength": 1 },
+            "evidence_basis": { "type": "string", "minLength": 1 },
+            "release_gate": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

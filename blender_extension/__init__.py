@@ -5,7 +5,13 @@ from __future__ import annotations
 import bpy
 
 from .host import probe_supported_host
-from .runtime import cancel_runtime_setup, clear_host_decision, get_host_decision, set_host_decision
+from .runtime import (
+    cancel_model_setup,
+    cancel_runtime_setup,
+    clear_host_decision,
+    get_host_decision,
+    set_host_decision,
+)
 from .ui import CLASSES
 
 
@@ -34,6 +40,7 @@ def unregister() -> None:
     """Cleanly remove every registered class in reverse order."""
 
     cancel_runtime_setup()
+    cancel_model_setup()
     _unregister_classes()
     clear_host_decision()
 

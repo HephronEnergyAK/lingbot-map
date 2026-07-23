@@ -32,6 +32,19 @@ def main() -> None:
     assert "Offline Setup is missing verified catalog artifacts" in snapshot.message, snapshot
     assert "python" in snapshot.message and "uv" in snapshot.message, snapshot
     assert not (EMPTY_ROOT / "runtimes").exists(), EMPTY_ROOT
+
+    result = bpy.ops.lingbot_map.download_model(model_id="skyseg")
+    assert result == {"FINISHED"}, result
+    deadline = time.monotonic() + 30
+    while runtime.get_model_setup_snapshot().state in {"running", "cancelling"}:
+        assert time.monotonic() < deadline, runtime.get_model_setup_snapshot()
+        time.sleep(0.05)
+    model_snapshot = runtime.get_model_setup_snapshot()
+    assert model_snapshot.state == "failed", model_snapshot
+    assert "Offline Setup is missing exact catalogued model artifacts" in model_snapshot.message
+    assert "skyseg" in model_snapshot.message
+    assert "ab9c34c64c3d821220a2886a4a06da4642ffa14d5b30e8d5339056a089aa1d39" in model_snapshot.message
+    assert not (EMPTY_ROOT / "models").exists(), EMPTY_ROOT
     print(
         "LINGBOT_MAP_RUNTIME_OPERATOR_SMOKE="
         + json.dumps(
@@ -40,6 +53,8 @@ def main() -> None:
                 "offline": True,
                 "actionable_missing_artifacts": True,
                 "runtime_published": False,
+                "model_registered": False,
+                "model_missing_report_exact": True,
                 "operator": extension.CLASSES[1].bl_idname,
             },
             sort_keys=True,
