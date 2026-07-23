@@ -641,6 +641,7 @@ class RuntimeInstaller:
                 if offline:
                     command.append("--offline")
                 self.runner.run(command, cwd=staging, env=environment, cancellation=cancellation)
+                (staging / "empty-cwd").mkdir()
                 self._validate_runtime(staging, cancellation)
                 self._relocate_virtual_environment(staging)
                 ready = {
@@ -703,6 +704,13 @@ class RuntimeInstaller:
 
     def _validate_runtime(self, directory: Path, cancellation: CancellationToken) -> None:
         self.bundle.validate_payload(directory)
+        empty_cwd = directory / "empty-cwd"
+        if (
+            not empty_cwd.is_dir()
+            or empty_cwd.is_symlink()
+            or any(empty_cwd.iterdir())
+        ):
+            raise RuntimeSetupError("Runtime trusted Worker working directory is absent or not empty")
         python = directory / "py" / "python" / ("python.exe" if os.name == "nt" else "bin/python3")
         if not python.is_file():
             raise RuntimeSetupError("Runtime does not contain exactly one managed CPython interpreter")

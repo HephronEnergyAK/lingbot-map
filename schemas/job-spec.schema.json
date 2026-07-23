@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://lingbot-map.invalid/schemas/job-spec/1.0.0",
+  "title": "LingBot Map Fixture JobSpec 1.0.0", "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "job_id", "target_scene", "timeline_start", "project_root", "fixture"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"}, "job_id": {"type": "string", "pattern": "^job-[0-9a-f]{32}$"},
+    "target_scene": {"$ref": "#/$defs/target_scene"}, "timeline_start": {"type": "integer", "minimum": -1048574, "maximum": 1048574},
+    "project_root": {"type": "string", "minLength": 1, "maxLength": 32767}, "fixture": {"$ref": "#/$defs/fixture"}
+  },
+  "$defs": {
+    "target_scene": {"type": "object", "additionalProperties": false, "required": ["blend_path", "scene_uuid", "scene_name"], "properties": {
+      "blend_path": {"type": "string", "minLength": 1, "maxLength": 32767}, "scene_uuid": {"type": "string", "format": "uuid"}, "scene_name": {"type": "string", "minLength": 1, "maxLength": 1024}
+    }},
+    "fixture": {"type": "object", "additionalProperties": false, "required": ["steps", "step_delay_seconds", "ignore_cancel", "heartbeat_interval_seconds", "freeze_heartbeat_after_sequence"], "properties": {
+      "steps": {"type": "integer", "minimum": 1, "maximum": 100000}, "step_delay_seconds": {"type": "number", "minimum": 0, "maximum": 60},
+      "ignore_cancel": {"type": "boolean"}, "heartbeat_interval_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 5},
+      "freeze_heartbeat_after_sequence": {"type": ["integer", "null"], "minimum": 1}
+    }}
+  }
+}

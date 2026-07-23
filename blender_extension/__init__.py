@@ -14,9 +14,38 @@ from .runtime import (
 )
 from .ui import CLASSES
 from .gpu_capability import shutdown_gpu_capability
+from .job_lifecycle import (
+    detach_job_monitor,
+    recover_jobs_for_blend,
+    report_job_recovery_error,
+)
 
 
 _registered_classes: list[type] = []
+
+
+def _persistent(function):
+    decorator = getattr(getattr(bpy.app, "handlers", None), "persistent", None)
+    return decorator(function) if decorator is not None else function
+
+
+@_persistent
+def _recover_jobs_after_load(_unused) -> None:
+    filepath = getattr(bpy.data, "filepath", "")
+    if filepath:
+        try:
+            recover_jobs_for_blend(filepath)
+        except Exception as exc:
+            # Invalid project IPC is visible but never allowed to break file loading.
+            report_job_recovery_error(exc)
+
+
+def _job_ui_timer():
+    for window in getattr(bpy.context.window_manager, "windows", ()):
+        for area in window.screen.areas:
+            if area.type == "VIEW_3D":
+                area.tag_redraw()
+    return 0.5
 
 
 def register() -> None:
@@ -31,6 +60,14 @@ def register() -> None:
         for extension_class in CLASSES:
             bpy.utils.register_class(extension_class)
             _registered_classes.append(extension_class)
+        handlers = getattr(bpy.app, "handlers", None)
+        timers = getattr(bpy.app, "timers", None)
+        if handlers is not None and _recover_jobs_after_load not in handlers.load_post:
+            handlers.load_post.append(_recover_jobs_after_load)
+        if timers is not None and not timers.is_registered(_job_ui_timer):
+            timers.register(_job_ui_timer, first_interval=0.1, persistent=True)
+        if hasattr(bpy, "data"):
+            _recover_jobs_after_load(None)
     except Exception:
         _unregister_classes()
         clear_host_decision()
@@ -43,6 +80,13 @@ def unregister() -> None:
     cancel_runtime_setup()
     cancel_model_setup()
     shutdown_gpu_capability()
+    detach_job_monitor()
+    handlers = getattr(bpy.app, "handlers", None)
+    timers = getattr(bpy.app, "timers", None)
+    if handlers is not None and _recover_jobs_after_load in handlers.load_post:
+        handlers.load_post.remove(_recover_jobs_after_load)
+    if timers is not None and timers.is_registered(_job_ui_timer):
+        timers.unregister(_job_ui_timer)
     _unregister_classes()
     clear_host_decision()
 

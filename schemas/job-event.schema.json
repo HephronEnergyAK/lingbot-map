@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://lingbot-map.invalid/schemas/job-event/1.0.0",
+  "title": "LingBot Map Job Event 1.0.0", "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "job_id", "sequence", "kind", "phase", "completed", "total", "message"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"}, "job_id": {"type": "string", "pattern": "^job-[0-9a-f]{32}$"}, "sequence": {"type": "integer", "minimum": 1},
+    "kind": {"enum": ["phase", "progress", "warning", "error", "cancelled", "succeeded"]}, "phase": {"type": "string", "minLength": 1, "maxLength": 256},
+    "completed": {"type": "integer", "minimum": 0}, "total": {"type": "integer", "minimum": 0}, "message": {"type": "string", "maxLength": 16384}
+  }
+}

@@ -271,6 +271,8 @@ class RegistrationTests(unittest.TestCase):
                 "lingbot_map.cancel_model_setup",
                 "lingbot_map.test_gpu_profiles",
                 "lingbot_map.cancel_gpu_profiles",
+                "lingbot_map.run_fixture_job",
+                "lingbot_map.cancel_active_job",
             ],
         )
         self.assertEqual([panel.bl_order for panel in panels], [0, 1, 2, 3, 4])

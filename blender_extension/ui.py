@@ -24,6 +24,13 @@ from .gpu_capability import (
     select_gpu_uuid,
     start_gpu_capability,
 )
+from .job_lifecycle import (
+    JobLifecycleError,
+    cancel_active_job,
+    ensure_unique_scene_uuid,
+    get_job_snapshot,
+    start_fixture_job,
+)
 
 
 class LINGBOTMAP_Preferences(bpy.types.AddonPreferences):
@@ -222,6 +229,56 @@ class LINGBOTMAP_OT_cancel_gpu_profiles(bpy.types.Operator):
         return {"FINISHED"} if cancel_gpu_capability() else {"CANCELLED"}
 
 
+class LINGBOTMAP_OT_run_fixture_job(bpy.types.Operator):
+    bl_idname = "lingbot_map.run_fixture_job"
+    bl_label = "Run Lifecycle Fixture Job"
+    bl_description = "Exercise the complete isolated Blender-to-Worker lifecycle without neural inference"
+
+    @classmethod
+    def poll(cls, _context):
+        decision = get_host_decision()
+        return bool(decision and decision.supported and get_job_snapshot().state not in {
+            "starting", "running", "reconnecting", "unresponsive", "cancelling"
+        })
+
+    def execute(self, context):
+        try:
+            blend_path = bpy.data.filepath
+            if not blend_path:
+                raise JobLifecycleError("Save the Blender file before launching a Job")
+            scene_uuid = ensure_unique_scene_uuid(context.scene, tuple(bpy.data.scenes))
+            if bpy.data.is_dirty:
+                raise JobLifecycleError("Save the .blend after its Scene UUID or other changes before launch")
+            preferences = _preferences(context)
+            start_fixture_job(
+                managed_root=_managed_root(preferences),
+                blend_path=blend_path,
+                scene_uuid=scene_uuid,
+                scene_name=context.scene.name,
+                timeline_start=context.scene.frame_current,
+            )
+        except (JobLifecycleError, ValueError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_cancel_active_job(bpy.types.Operator):
+    bl_idname = "lingbot_map.cancel_active_job"
+    bl_label = "Cancel Active Job"
+
+    @classmethod
+    def poll(cls, _context):
+        return get_job_snapshot().state in {"starting", "running", "reconnecting", "unresponsive", "cancelling"}
+
+    def execute(self, _context):
+        try:
+            return {"FINISHED"} if cancel_active_job() else {"CANCELLED"}
+        except JobLifecycleError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+
 class _LINGBOTMAP_LifecyclePanel:
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -342,7 +399,8 @@ class LINGBOTMAP_PT_reconstruct(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         layout.label(text="Configure one Capture Source and Reconstruction Profile")
         row = layout.row()
         row.enabled = bool(decision and decision.supported)
-        row.label(text="Start Reconstruction is unavailable until Setup is complete")
+        row.operator(LINGBOTMAP_OT_run_fixture_job.bl_idname)
+        layout.label(text="Fixture runs the complete lifecycle without neural inference")
 
 
 class LINGBOTMAP_PT_active_job(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
@@ -351,7 +409,18 @@ class LINGBOTMAP_PT_active_job(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
     bl_order = 2
 
     def draw(self, _context):
-        self.layout.label(text="No active Reconstruction Job")
+        snapshot = get_job_snapshot()
+        layout = self.layout
+        icon = "CHECKMARK" if snapshot.state == "succeeded" else "ERROR" if snapshot.state in {
+            "failed", "interrupted", "forced_termination", "protocol_error", "stale_identity"
+        } else "INFO"
+        layout.label(text=snapshot.message, icon=icon)
+        if snapshot.job_id:
+            layout.label(text=f"Job: {snapshot.job_id}")
+        if snapshot.phase:
+            layout.label(text=f"{snapshot.phase}: {snapshot.completed}/{snapshot.total}")
+        if snapshot.state in {"starting", "running", "reconnecting", "unresponsive", "cancelling"}:
+            layout.operator(LINGBOTMAP_OT_cancel_active_job.bl_idname)
 
 
 class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
@@ -381,6 +450,8 @@ CLASSES = (
     LINGBOTMAP_OT_cancel_model_setup,
     LINGBOTMAP_OT_test_gpu_profiles,
     LINGBOTMAP_OT_cancel_gpu_profiles,
+    LINGBOTMAP_OT_run_fixture_job,
+    LINGBOTMAP_OT_cancel_active_job,
     LINGBOTMAP_PT_setup,
     LINGBOTMAP_PT_reconstruct,
     LINGBOTMAP_PT_active_job,

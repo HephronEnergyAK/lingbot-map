@@ -12,6 +12,30 @@
       "version": "1.0.0",
       "path": "model-catalog.schema.json",
       "sha256": "33c7633cf300bbece893fae137135b987e07afb3c72ef7bfc2e5ff262d3a9b26"
+    },
+    {
+      "id": "job-spec",
+      "version": "1.0.0",
+      "path": "job-spec.schema.json",
+      "sha256": "5854d6ace221903838214f142cb896e4b2c32a785031149edfb69f3a57219f72"
+    },
+    {
+      "id": "job-control",
+      "version": "1.0.0",
+      "path": "job-control.schema.json",
+      "sha256": "4ff593765e01c16891953f0185f79652fee98c026ee7036d91caa570d1575bbb"
+    },
+    {
+      "id": "job-event",
+      "version": "1.0.0",
+      "path": "job-event.schema.json",
+      "sha256": "3d312feb799a7df9eb5cde1cd681cb3e7f4915dcef353f2de1f7f7ef4aefc667"
+    },
+    {
+      "id": "job-status",
+      "version": "1.0.0",
+      "path": "job-status.schema.json",
+      "sha256": "29c3042dd6b61bb9c3797239faf55a119ab59cbe27d03c8fc5588b2b9d524de5"
     }
   ]
 }

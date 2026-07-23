@@ -1,4 +1,4 @@
-"""Headless Worker entry point; Job execution is added by later tickets."""
+"""Headless Worker entry point."""
 
 from __future__ import annotations
 
@@ -27,6 +27,13 @@ def main() -> int:
         metavar="REQUEST",
         help="Run one validated GPU capability-test request",
     )
+    parser.add_argument(
+        "--fixture-job",
+        type=Path,
+        metavar="JOB_SPEC",
+        help="Run one deterministic lifecycle fixture from an immutable JobSpec",
+    )
+    parser.add_argument("--job-nonce", help=argparse.SUPPRESS)
     arguments = parser.parse_args()
     if arguments.identity:
         print(json.dumps(identity(), sort_keys=True, separators=(",", ":")))
@@ -39,6 +46,12 @@ def main() -> int:
         from .capability_cli import run_capability_test
 
         return run_capability_test(arguments.capability_test)
+    if arguments.fixture_job is not None:
+        if not arguments.job_nonce:
+            parser.error("--fixture-job requires --job-nonce")
+        from .fixture_job import run_fixture_job
+
+        return run_fixture_job(arguments.fixture_job, arguments.job_nonce)
     parser.error("a validated Job Control Envelope is required")
     return 2
 
