@@ -1,0 +1,28 @@
+schema_version = "1.0.0"
+
+id = "lingbot_map_reconstruction"
+version = "0.1.0"
+name = "LingBot Map Reconstruction"
+tagline = "Reconstruct colored point clouds and animated cameras from video"
+maintainer = "LingBot Map Contributors"
+type = "add-on"
+
+blender_version_min = "5.2.0"
+blender_version_max = "5.3.0"
+platforms = ["windows-x64"]
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Use selected videos, project data, managed setup, and exports"
+network = "Download selected Runtime or model after an online Setup action"
+clipboard = "Copy a diagnostic report after an explicit user action"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "*.pyc",
+  "/.git/",
+  "/*.zip",
+  "/tests/",
+]
