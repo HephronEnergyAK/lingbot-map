@@ -78,7 +78,8 @@
     "warnings": {"type": "array", "items": {"$ref": "#/$defs/warning"}},
     "provenance": {"$ref": "#/$defs/provenance"},
     "logs": {"type": "array", "items": {"$ref": "#/$defs/file"}},
-    "dense_predictions": {"$ref": "#/$defs/dense_descriptor"}
+    "dense_predictions": {"$ref": "#/$defs/dense_descriptor"},
+    "window_alignment": {"$ref": "#/$defs/window_alignment"}
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -107,6 +108,35 @@
         "manifest_byte_length": {"type": "integer", "minimum": 1, "maximum": 16777216},
         "manifest_sha256": {"$ref": "#/$defs/sha256"}
       }
+    },
+    "window_alignment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "rule_version", "strategy", "window_frames", "overlap_keyframes", "scale_frames", "keyframe_interval", "loop_closure", "pose_graph", "bundle_adjustment", "global_optimization", "boundaries"],
+      "properties": {
+        "schema_version": {"const": "1.0.0"}, "rule_version": {"const": "1.0.0"}, "strategy": {"const": "rolling-similarity"},
+        "window_frames": {"const": 64}, "overlap_keyframes": {"const": 16},
+        "scale_frames": {"const": 8}, "keyframe_interval": {"const": 1},
+        "loop_closure": {"const": false}, "pose_graph": {"const": false},
+        "bundle_adjustment": {"const": false}, "global_optimization": {"const": false},
+        "boundaries": {"type": "array", "items": {"$ref": "#/$defs/window_boundary"}}
+      }
+    },
+    "window_boundary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_frame_start", "source_frame_end", "paired_keyframes", "relative_scale", "rotation_difference_degrees", "normalized_camera_center_distance", "absolute_log_depth_ratio", "camera_pair_count", "depth_pixel_count", "triggered_conditions"],
+      "properties": {
+        "source_frame_start": {"type": "integer", "minimum": 0}, "source_frame_end": {"type": "integer", "minimum": 0},
+        "paired_keyframes": {"const": 16}, "relative_scale": {"type": "number", "minimum": 0.0001, "maximum": 10000},
+        "rotation_difference_degrees": {"$ref": "#/$defs/residual_summary"},
+        "normalized_camera_center_distance": {"$ref": "#/$defs/residual_summary"},
+        "absolute_log_depth_ratio": {"$ref": "#/$defs/residual_summary"},
+        "camera_pair_count": {"const": 16}, "depth_pixel_count": {"type": "integer", "minimum": 1},
+        "triggered_conditions": {"type": "array", "uniqueItems": true, "items": {"enum": ["paired_keyframes", "relative_scale", "rotation_p95", "center_distance_p95", "log_depth_ratio_p95"]}}
+      }
+    },
+    "residual_summary": {
+      "type": "object", "additionalProperties": false, "required": ["median", "p95"],
+      "properties": {"median": {"type": "number", "minimum": 0}, "p95": {"type": "number", "minimum": 0}}
     },
     "confidence_statistics": {
       "type": "object", "additionalProperties": false,

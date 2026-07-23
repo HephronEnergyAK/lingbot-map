@@ -336,7 +336,7 @@ dependencies = [
     { name = "torch" },
 ]
 wheels = [
-    { filename = "lingbot_map_worker-0.1.0-py3-none-any.whl", hash = "sha256:9715fe4cebf90f512e7b7fca30951d34465a6af0f3a13787eee0e056208db2f7" },
+    { filename = "lingbot_map_worker-0.1.0-py3-none-any.whl", hash = "sha256:6099feeb6df479075d73fe64e671da240f9100e7d96a5464e4147a13b9aed05b" },
 ]
 
 [package.metadata]

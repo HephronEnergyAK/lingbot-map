@@ -141,3 +141,20 @@ def estimate_dense_buffer_bytes(frame_count: int, grid_pixels: int) -> int:
     if frame_count < 1 or grid_pixels < 1:
         raise ResourceGateError("dense buffer dimensions must be positive")
     return min(frame_count, 64) * grid_pixels * 4 * 2
+
+
+def estimate_window_alignment_memory_bytes(grid_pixels: int) -> int:
+    """CPU buffers for one 64-frame window plus the prior 16-frame overlap."""
+
+    if grid_pixels < 1:
+        raise ResourceGateError("window alignment grid must be positive")
+    canonical_inputs = 64 * grid_pixels * (3 * 4 + 3)
+    decoded_predictions = (64 + 16) * grid_pixels * (4 + 4 + 3)
+    alignment_scratch = 16 * grid_pixels * 8 * 5
+    camera_and_metadata = (64 + 16) * 2048
+    return (
+        canonical_inputs
+        + decoded_predictions
+        + alignment_scratch
+        + camera_and_metadata
+    )

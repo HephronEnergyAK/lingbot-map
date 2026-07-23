@@ -225,7 +225,7 @@ def validate_job_spec(value: Any) -> dict[str, Any]:
             },
             label="reconstruction.preflight",
         )
-        _integer(preflight["frame_count"], "preflight.frame_count", 8, 3000)
+        _integer(preflight["frame_count"], "preflight.frame_count", 8)
         _integer(preflight["video_stream_index"], "preflight.video_stream_index", 0)
         _integer(preflight["displayed_width"], "preflight.displayed_width", 1)
         _integer(preflight["displayed_height"], "preflight.displayed_height", 1)

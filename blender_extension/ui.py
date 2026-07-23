@@ -651,6 +651,17 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
             box.label(text="Ready", icon="CHECKMARK")
             box.label(text=f"{result.profile_name}: {result.point_count:,} points")
             box.label(text=f"{result.frame_count:,} frames · {result.result_id}")
+            if result.alignment_boundary_count:
+                if result.quality_warning_count:
+                    box.label(
+                        text=f"Quality Warning: {result.quality_warning_count} window boundaries",
+                        icon="ERROR",
+                    )
+                    box.label(text=f"Worst boundary {result.worst_boundary}")
+                else:
+                    box.label(
+                        text=f"Window alignment: {result.alignment_boundary_count} boundaries · no warnings"
+                    )
             if result.dense_status == "available":
                 box.label(text="Dense Predictions: available", icon="CHECKMARK")
             elif result.dense_status == "incompatible":

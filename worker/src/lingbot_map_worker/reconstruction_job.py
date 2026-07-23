@@ -1,4 +1,4 @@
-"""Qualified native-Windows Reconstruction Job for sources through 3000 frames."""
+"""Qualified native-Windows Reconstruction Job for complete Capture Sources."""
 
 from __future__ import annotations
 
@@ -42,7 +42,12 @@ from .gpu_profiles import (
 )
 from .ipc import read_json
 from .model_store_compat import is_reparse_point
-from .production_model import TorchPredictionDecoder, load_production_adapter
+from .long_pipeline import WindowedReconstructionPipeline
+from .production_model import (
+    TorchPredictionDecoder,
+    load_production_adapter,
+    load_production_window_predictor,
+)
 from .provenance import result_provenance
 from .result_bundle import ResultCancelled
 from .result_pipeline import (
@@ -54,6 +59,7 @@ from .result_resources import (
     SystemResourceProbe,
     estimate_fixture_memory_bytes,
     estimate_dense_buffer_bytes,
+    estimate_window_alignment_memory_bytes,
     require_project_disk,
     require_worker_memory,
 )
@@ -212,6 +218,8 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
         )
         if retain_dense:
             estimated_memory += estimate_dense_buffer_bytes(total_frames, grid_pixels)
+        if plan.mode == "windowed":
+            estimated_memory += estimate_window_alignment_memory_bytes(grid_pixels)
         require_worker_memory(probe, estimated_memory)
         source_document = {
             "absolute_path": source_raw["absolute_path"],
@@ -361,7 +369,11 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
                 created_utc=datetime.now(timezone.utc).isoformat(),
                 model_grid_shape=(canonical_height, canonical_width),
             ),
-            prediction_decoder=TorchPredictionDecoder(),
+            prediction_decoder=(
+                TorchPredictionDecoder()
+                if plan.mode == "streaming"
+                else lambda prediction, _canonical, _pts: prediction
+            ),
             resource_probe=probe,
             cancel=lambda: _cancelled(job_dir),
             provenance_factory=provenance,
@@ -384,6 +396,22 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
             model_loaded = True
             return adapter
 
+        def predictor_factory(current_plan, _profile, _frame_shape):
+            nonlocal model_loaded
+            import torch
+            torch.set_num_threads(torch_threads)
+            torch.set_num_interop_threads(1)
+            predictor = load_production_window_predictor(
+                model_path=model_path,
+                expected_sha256=model["sha256"],
+                plan=current_plan,
+                profile=execution_profile,
+                cancel=lambda: _cancelled(job_dir),
+                torch_module=torch,
+            )
+            model_loaded = True
+            return predictor
+
         frame_source = (
             SourceFrame(item.frame_index, item.pts_seconds, item.srgb)
             for item in iter_capture_source_frames(
@@ -394,7 +422,11 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
             )
         )
         with gate.acquire(identity, nonce=nonce, job_id=job["job_id"]):
-            pipeline = ShortReconstructionPipeline(adapter_factory)
+            pipeline = (
+                ShortReconstructionPipeline(adapter_factory)
+                if plan.mode == "streaming"
+                else WindowedReconstructionPipeline(predictor_factory)
+            )
             outcome = pipeline.run(
                 frame_count=total_frames,
                 frames=frame_source,

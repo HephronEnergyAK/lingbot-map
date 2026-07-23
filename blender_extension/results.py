@@ -34,6 +34,9 @@ class ReadyResult:
     frame_count: int
     profile_name: str
     dense_status: str = "not-retained"
+    alignment_boundary_count: int = 0
+    quality_warning_count: int = 0
+    worst_boundary: str | None = None
 
 
 def _ordinary_relative_file(root: Path, value: Any) -> Path:
@@ -116,6 +119,55 @@ def _dense_status(directory: Path, raw: Any) -> str:
         return "unavailable"
 
 
+def _alignment_status(raw: Any) -> tuple[int, int, str | None]:
+    if raw is None:
+        return 0, 0, None
+    alignment = require_exact_object(
+        raw,
+        {
+            "schema_version", "rule_version", "strategy", "window_frames", "overlap_keyframes",
+            "scale_frames", "keyframe_interval", "loop_closure", "pose_graph",
+            "bundle_adjustment", "global_optimization", "boundaries",
+        },
+        label="window_alignment",
+    )
+    if (
+        alignment["schema_version"] != "1.0.0"
+        or alignment["rule_version"] != "1.0.0"
+        or alignment["strategy"] != "rolling-similarity"
+        or tuple(alignment[name] for name in (
+            "window_frames", "overlap_keyframes", "scale_frames", "keyframe_interval"
+        )) != (64, 16, 8, 1)
+        or any(alignment[name] is not False for name in (
+            "loop_closure", "pose_graph", "bundle_adjustment", "global_optimization"
+        ))
+        or not isinstance(alignment["boundaries"], list)
+    ):
+        raise IpcError("window alignment contract is invalid")
+    warning_boundaries = []
+    for boundary in alignment["boundaries"]:
+        if not isinstance(boundary, dict) or not isinstance(
+            boundary.get("triggered_conditions"), list
+        ):
+            raise IpcError("window alignment boundary is invalid")
+        if boundary["triggered_conditions"]:
+            warning_boundaries.append(boundary)
+    worst = None
+    if warning_boundaries:
+        boundary = max(
+            warning_boundaries,
+            key=lambda item: (
+                len(item["triggered_conditions"]),
+                float(item.get("source_frame_end", -1)),
+            ),
+        )
+        worst = (
+            f"frames {boundary['source_frame_start']}-{boundary['source_frame_end']}: "
+            + ", ".join(boundary["triggered_conditions"])
+        )
+    return len(alignment["boundaries"]), len(warning_boundaries), worst
+
+
 def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> ReadyResult:
     directory = Path(os.path.abspath(directory))
     if (
@@ -134,7 +186,7 @@ def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> Read
     if (
         not isinstance(manifest, dict)
         or not required_fields.issubset(manifest)
-        or not set(manifest).issubset(required_fields | {"dense_predictions"})
+        or not set(manifest).issubset(required_fields | {"dense_predictions", "window_alignment"})
     ):
         raise IpcError("Result manifest has unknown or missing fields")
     if manifest["schema_version"] != RESULT_SCHEMA_VERSION:
@@ -178,6 +230,9 @@ def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> Read
     for log in manifest["logs"]:
         descriptor = require_exact_object(log, {"path", "byte_length", "sha256"}, label="log")
         _ordinary_relative_file(directory, descriptor["path"])
+    boundary_count, quality_warning_count, worst_boundary = _alignment_status(
+        manifest.get("window_alignment")
+    )
     return ReadyResult(
         result_id,
         job_id,
@@ -187,6 +242,9 @@ def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> Read
         counts["frames"],
         require_text(profile["name"], label="profile.name", maximum=128),
         _dense_status(directory, manifest.get("dense_predictions")),
+        boundary_count,
+        quality_warning_count,
+        worst_boundary,
     )
 
 

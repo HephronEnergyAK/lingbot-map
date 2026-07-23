@@ -71,6 +71,7 @@ class ResultPublication:
     created_utc: str | None = None
     result_id: str | None = None
     dense_component: DenseComponentArtifact | None = None
+    window_alignment: Mapping[str, Any] | None = None
 
 
 CORE_ARRAY_DTYPES = {
@@ -366,7 +367,7 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
     if (
         not isinstance(manifest, dict)
         or not fields.issubset(manifest)
-        or not set(manifest).issubset(fields | {"dense_predictions"})
+        or not set(manifest).issubset(fields | {"dense_predictions", "window_alignment"})
     ):
         raise ResultBundleError("Result manifest has unknown or missing fields")
     if manifest["schema_version"] != RESULT_SCHEMA_VERSION:
@@ -531,6 +532,93 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
         record = require_exact_object(warning, {"code", "message"}, label="warning")
         require_text(record["code"], label="warning.code", maximum=128)
         require_text(record["message"], label="warning.message", maximum=16384)
+    window_alignment = manifest.get("window_alignment")
+    if window_alignment is not None:
+        alignment = require_exact_object(
+            window_alignment,
+            {
+                "schema_version", "rule_version", "strategy", "window_frames", "overlap_keyframes",
+                "scale_frames", "keyframe_interval", "loop_closure", "pose_graph",
+                "bundle_adjustment", "global_optimization", "boundaries",
+            },
+            label="window_alignment",
+        )
+        if alignment != {
+            **alignment,
+            "schema_version": "1.0.0",
+            "rule_version": "1.0.0",
+            "strategy": "rolling-similarity",
+            "window_frames": 64,
+            "overlap_keyframes": 16,
+            "scale_frames": 8,
+            "keyframe_interval": 1,
+            "loop_closure": False,
+            "pose_graph": False,
+            "bundle_adjustment": False,
+            "global_optimization": False,
+        }:
+            raise ResultBundleError("window alignment is not the fixed v1 contract")
+        boundaries = alignment["boundaries"]
+        expected_boundaries = math.ceil(max(0, frame_count - 64) / 48)
+        if not isinstance(boundaries, list) or len(boundaries) != expected_boundaries:
+            raise ResultBundleError("window alignment boundary count is inconsistent")
+        previous_end = -1
+        triggered_count = 0
+        for index, raw in enumerate(boundaries):
+            boundary = require_exact_object(
+                raw,
+                {
+                    "source_frame_start", "source_frame_end", "paired_keyframes",
+                    "relative_scale", "rotation_difference_degrees",
+                    "normalized_camera_center_distance", "absolute_log_depth_ratio",
+                    "camera_pair_count", "depth_pixel_count", "triggered_conditions",
+                },
+                label=f"window_alignment.boundaries[{index}]",
+            )
+            start, end = boundary["source_frame_start"], boundary["source_frame_end"]
+            if (
+                not all(isinstance(value, int) and not isinstance(value, bool) for value in (start, end))
+                or end - start != 15
+                or start <= previous_end
+                or not 0 <= start <= end < frame_count
+                or boundary["paired_keyframes"] != 16
+                or boundary["camera_pair_count"] != 16
+                or not isinstance(boundary["depth_pixel_count"], int)
+                or isinstance(boundary["depth_pixel_count"], bool)
+                or boundary["depth_pixel_count"] < 1
+            ):
+                raise ResultBundleError("window alignment boundary identity is invalid")
+            previous_end = end
+            for label in (
+                "rotation_difference_degrees",
+                "normalized_camera_center_distance",
+                "absolute_log_depth_ratio",
+            ):
+                summary = require_exact_object(boundary[label], {"median", "p95"}, label=label)
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or value < 0
+                    for value in summary.values()
+                ):
+                    raise ResultBundleError("window alignment residual is invalid")
+            scale = boundary["relative_scale"]
+            if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(float(scale)) or not 1e-4 <= scale <= 1e4:
+                raise ResultBundleError("window alignment scale is invalid")
+            conditions = boundary["triggered_conditions"]
+            allowed = {
+                "paired_keyframes", "relative_scale", "rotation_p95",
+                "center_distance_p95", "log_depth_ratio_p95",
+            }
+            if not isinstance(conditions, list) or len(conditions) != len(set(conditions)) or not set(conditions) <= allowed:
+                raise ResultBundleError("window alignment warning conditions are invalid")
+            triggered_count += bool(conditions)
+        quality_warning_count = sum(
+            warning.get("code") == "quality_warning" for warning in warnings
+        )
+        if quality_warning_count != triggered_count:
+            raise ResultBundleError("window alignment Quality Warnings disagree with boundaries")
     provenance = require_exact_object(
         manifest["provenance"],
         {
@@ -640,6 +728,8 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
             raise ResultBundleError(f"inference {name} is invalid")
     if inference["prediction_heads"] not in [["camera", "depth"], ["fixture"]]:
         raise ResultBundleError("inference prediction heads are invalid")
+    if (inference["mode"] == "windowed") != (window_alignment is not None):
+        raise ResultBundleError("windowed inference and alignment provenance disagree")
     suspension = require_exact_object(
         provenance["suspension"], {"count", "total_seconds"}, label="provenance suspension"
     )
@@ -798,6 +888,8 @@ def publish_result_bundle(
         }
         if dense_descriptor is not None:
             manifest["dense_predictions"] = dense_descriptor
+        if publication.window_alignment is not None:
+            manifest["window_alignment"] = dict(publication.window_alignment)
         if cancel():
             raise ResultCancelled("Result publication was cancelled before commit")
         disk_check(max(0, remaining))

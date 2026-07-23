@@ -44,7 +44,11 @@ if np is not None:
     )
     from lingbot_map_worker.result_resources import FixedResourceProbe, ResourceGateError
     from lingbot_map_worker.provenance import result_provenance
-    from lingbot_map_worker.production_model import TorchPredictionDecoder
+    from lingbot_map_worker.long_pipeline import WindowFrame
+    from lingbot_map_worker.production_model import (
+        ProductionWindowPredictor,
+        TorchPredictionDecoder,
+    )
     import lingbot_map.utils.pose_enc as pose_enc
 
 
@@ -428,6 +432,81 @@ class ShortPipelineTests(unittest.TestCase):
         self.assertEqual(decoded.world_to_camera_opencv.dtype.str, "<f8")
         self.assertEqual(decoded.depth.dtype.str, "<f4")
         self.assertEqual(decoded.confidence.dtype.str, "<f4")
+
+    def test_production_window_predictor_reuses_model_and_resets_bounded_adapter_state(self):
+        adapters = []
+        backends = []
+
+        class FakeBackend:
+            def __init__(self, model, **_kwargs):
+                self.model = model
+                backends.append(self)
+
+        class FakeAdapter:
+            def __init__(self, backend, **_kwargs):
+                self.backend = backend
+                self.closed = False
+                adapters.append(self)
+
+            def submit(self, frame):
+                return (type("Prediction", (), {
+                    "frame_index": frame.frame_index,
+                    "frame_type": 1,
+                })(),)
+
+            def finish(self):
+                self.closed = True
+
+            def close(self):
+                self.closed = True
+
+        class FakeDecoder:
+            def __call__(self, prediction, canonical_image, pts):
+                return AlignedPrediction(
+                    prediction.frame_index,
+                    1,
+                    pts,
+                    np.eye(4, dtype="<f8"),
+                    np.eye(3, dtype="<f8"),
+                    np.ones((2, 2), dtype="<f4"),
+                    np.ones((2, 2), dtype="<f4"),
+                    canonical_image.color_rgb,
+                )
+
+        fake_torch = type("Torch", (), {
+            "cuda": type("Cuda", (), {
+                "is_available": staticmethod(lambda: False),
+                "empty_cache": staticmethod(lambda: None),
+            })(),
+        })()
+        plan = inference_plan(3001)
+        with (
+            mock.patch("lingbot_map_worker.production_model.GCTStreamBackend", FakeBackend),
+            mock.patch("lingbot_map_worker.production_model.ReconstructionModelAdapter", FakeAdapter),
+            mock.patch("lingbot_map_worker.production_model.TorchPredictionDecoder", FakeDecoder),
+        ):
+            predictor = ProductionWindowPredictor(
+                object(),
+                plan=plan,
+                device="cuda:0",
+                autocast_dtype="float16",
+                torch_module=fake_torch,
+            )
+            for start in (0, 48):
+                window = tuple(
+                    WindowFrame(index, index / 25.0, canonical(None))
+                    for index in range(start, start + 8)
+                )
+                predicted = predictor.predict(window, cancel=lambda: False)
+                self.assertEqual(
+                    [item.frame_index for item in predicted],
+                    list(range(start, start + 8)),
+                )
+            predictor.close()
+        self.assertEqual(len(backends), 2)
+        self.assertEqual(len(adapters), 2)
+        self.assertTrue(all(adapter.closed for adapter in adapters))
+        self.assertIs(backends[0].model, backends[1].model)
 
 
 class FakeExecutionState:

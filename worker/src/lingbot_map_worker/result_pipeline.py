@@ -462,6 +462,8 @@ class IncrementalBundleResultSink:
         self.fov: list[tuple[float, float]] = []
         self.timestamps: list[float] = []
         self.frame_types: list[int] = []
+        self.window_boundaries: list[dict[str, Any]] = []
+        self.window_warnings: list[Mapping[str, str]] = []
         self.normalization: np.ndarray | None = None
         self.model_shape: tuple[int, int] | None = None
         self._finished = False
@@ -565,6 +567,15 @@ class IncrementalBundleResultSink:
         self.timestamps.append(float(aligned.source_pts_seconds))
         self.frame_types.append(int(aligned.frame_type))
 
+    def record_window_boundary(self, metrics: Any) -> None:
+        if self._finished:
+            raise ResultPipelineError("incremental Result sink is already finished")
+        document = metrics.document()
+        warning = metrics.warning()
+        self.window_boundaries.append(document)
+        if warning is not None:
+            self.window_warnings.append(warning)
+
     def finish(self) -> ResultBuildOutcome:
         if self._finished:
             raise ResultPipelineError("incremental Result sink finish is not repeatable")
@@ -616,13 +627,31 @@ class IncrementalBundleResultSink:
             source=self.request.source,
             profile=profile,
             provenance=provenance,
-            warnings=self.request.warnings,
+            warnings=(*self.request.warnings, *self.window_warnings),
             arrays=arrays,
             voxel_edge_length=reduced.edge_length,
             voxel_origin=(0.0, 0.0, 0.0),
             created_utc=self.request.created_utc,
             result_id=self.request.result_id,
             dense_component=dense_component,
+            window_alignment=(
+                {
+                    "schema_version": "1.0.0",
+                    "rule_version": "1.0.0",
+                    "strategy": "rolling-similarity",
+                    "window_frames": 64,
+                    "overlap_keyframes": 16,
+                    "scale_frames": 8,
+                    "keyframe_interval": 1,
+                    "loop_closure": False,
+                    "pose_graph": False,
+                    "bundle_adjustment": False,
+                    "global_optimization": False,
+                    "boundaries": self.window_boundaries,
+                }
+                if self.window_boundaries
+                else None
+            ),
         )
 
         def disk_check(remaining: int) -> None:

@@ -206,7 +206,7 @@ def latest_successful_preflight(
                 frozen["absolute_path"] == str(source)
                 and frozen["size_bytes"] == current.st_size
                 and frozen["modification_time_ns"] == current.st_mtime_ns
-                and 8 <= int(timing["frame_count"]) <= 3000
+                and 8 <= int(timing["frame_count"])
             ):
                 candidates.append((path.stat().st_mtime_ns, document))
         except (KeyError, TypeError, ValueError, OSError, IpcError):
