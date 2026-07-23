@@ -13,6 +13,7 @@ from .runtime import (
     set_host_decision,
 )
 from .ui import CLASSES
+from .gpu_capability import shutdown_gpu_capability
 
 
 _registered_classes: list[type] = []
@@ -41,6 +42,7 @@ def unregister() -> None:
 
     cancel_runtime_setup()
     cancel_model_setup()
+    shutdown_gpu_capability()
     _unregister_classes()
     clear_host_decision()
 

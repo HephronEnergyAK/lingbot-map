@@ -102,7 +102,23 @@ class RuntimeFixture:
         (self.bundle_root / "artifact-catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
         inputs = {
             "pyproject.toml": "[project]\nname='runtime'\nversion='0.1.0'\n",
-            "uv.lock": "version = 1\n",
+            "uv.lock": (
+                "version = 1\n"
+                "[[package]]\n"
+                "name = 'lingbot-map-worker'\n"
+                "version = '0.1.0'\n"
+                "source = { path = 'wheels/lingbot_map_worker-0.1.0-py3-none-any.whl' }\n"
+            ),
+            "runtime-inventory.json": json.dumps(
+                {
+                    "schema_version": 1,
+                    "platform": "windows-x64",
+                    "python": "3.10.20",
+                    "packages": [
+                        {"name": "lingbot-map-worker", "version": "0.1.0"}
+                    ],
+                }
+            ),
             "wheels/lingbot_map_worker-0.1.0-py3-none-any.whl": "wheel",
             "schemas/catalog.json": "{}",
             "model-catalog.json": "{}",
@@ -149,6 +165,7 @@ class RuntimeIdentityTests(unittest.TestCase):
             self.assertTrue(
                 {
                     "artifact-catalog.json", "pyproject.toml", "uv.lock",
+                    "runtime-inventory.json",
                     "wheels/lingbot_map_worker-0.1.0-py3-none-any.whl",
                     "schemas/catalog.json", "model-catalog.json",
                     "model-licenses/model-license.txt",
@@ -218,16 +235,24 @@ class RuntimeInstallerTests(unittest.TestCase):
                 ).setup(offline=False, online_access=True)
             self.assertEqual(installed.parent, managed / "runtimes")
             self.assertEqual(installed.name, bundle.identity.runtime_id)
+            self.assertEqual(
+                runtime_setup.RuntimeInstaller(
+                    managed, bundle, downloader=fixture.downloader, runner=runner
+                ).validate_existing(),
+                installed,
+            )
             self.assertTrue((installed / "READY.json").is_file())
             self.assertIn(str(installed), (installed / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8"))
             self.assertFalse(any(installed.parent.glob(".staging-*")))
             sync_command, _, environment = next(call for call in runner.calls if "sync" in call[0])
-            for argument in ("--frozen", "--no-dev", "--no-config", "--no-index", "--managed-python", "--no-python-downloads"):
+            for argument in ("--frozen", "--no-dev", "--no-config", "--managed-python", "--no-python-downloads"):
                 self.assertIn(argument, sync_command)
+            self.assertNotIn("--no-index", sync_command)
             for name in poisoned:
                 self.assertNotIn(name, environment)
             self.assertEqual(environment["UV_NO_CONFIG"], "1")
             self.assertNotIn("UV_OFFLINE", environment)
+            self.assertEqual(environment["UV_CACHE_DIR"], str((managed / "uv-cache").resolve()))
 
     def test_offline_sync_stale_recovery_multiple_identities_and_reuse(self):
         with tempfile.TemporaryDirectory() as temporary:

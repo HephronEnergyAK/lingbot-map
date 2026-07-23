@@ -19,6 +19,7 @@ import sys
 import tarfile
 import threading
 import time
+import tomllib
 from typing import Callable, Iterable, Mapping, Sequence
 import urllib.request
 import uuid
@@ -130,6 +131,7 @@ class RuntimeBundle:
         "artifact-catalog.json",
         "pyproject.toml",
         "uv.lock",
+        "runtime-inventory.json",
         "wheels/*.whl",
         "schemas/**/*.json",
         "model-catalog.json",
@@ -153,7 +155,60 @@ class RuntimeBundle:
         if {artifact.name for artifact in self.artifacts} != {"python", "uv"}:
             raise RuntimeSetupError("Artifact catalog must contain exactly pinned python and uv")
         self.payload_files = self._discover_payload()
+        self.expected_inventory = self._locked_inventory()
         self.identity = self._derive_identity()
+
+    def _locked_inventory(self) -> tuple[tuple[str, str], ...]:
+        try:
+            document = tomllib.loads((self.root / "uv.lock").read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+            raise RuntimeSetupError(f"Cannot read frozen Runtime lock inventory: {exc}") from exc
+        packages = document.get("package", [])
+        if not isinstance(packages, list):
+            raise RuntimeSetupError("Runtime lock package inventory must be an array")
+        locked = {}
+        for package in packages:
+            if not isinstance(package, dict):
+                raise RuntimeSetupError("Runtime lock package entry must be an object")
+            source = package.get("source", {})
+            if isinstance(source, dict) and "virtual" in source:
+                continue
+            name = str(package.get("name", "")).lower().replace("_", "-")
+            version = str(package.get("version", ""))
+            if not name or not version:
+                raise RuntimeSetupError("Runtime lock package lacks an exact name or version")
+            if name in locked:
+                raise RuntimeSetupError("Runtime lock contains duplicate package names")
+            locked[name] = version
+        try:
+            manifest = json.loads(
+                (self.root / "runtime-inventory.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeSetupError(f"Cannot read Windows Runtime inventory: {exc}") from exc
+        if (
+            not isinstance(manifest, dict)
+            or set(manifest) != {"schema_version", "platform", "python", "packages"}
+            or manifest["schema_version"] != 1
+            or manifest["platform"] != "windows-x64"
+            or manifest["python"] != PYTHON_VERSION
+            or not isinstance(manifest["packages"], list)
+        ):
+            raise RuntimeSetupError("Windows Runtime inventory identity is invalid")
+        inventory = []
+        for item in manifest["packages"]:
+            if not isinstance(item, dict) or set(item) != {"name", "version"}:
+                raise RuntimeSetupError("Windows Runtime inventory package is invalid")
+            name = str(item["name"]).lower().replace("_", "-")
+            version = str(item["version"])
+            if locked.get(name) != version:
+                raise RuntimeSetupError(
+                    f"Windows Runtime inventory is not pinned by uv.lock: {name}=={version}"
+                )
+            inventory.append((name, version))
+        if len({name for name, _version in inventory}) != len(inventory):
+            raise RuntimeSetupError("Runtime lock contains duplicate package names")
+        return tuple(sorted(inventory))
 
     def _discover_payload(self) -> tuple[Path, ...]:
         found: set[Path] = set()
@@ -450,7 +505,9 @@ class ProcessRunner:
         return result
 
 
-def isolated_environment(staging: Path, *, offline: bool) -> dict[str, str]:
+def isolated_environment(
+    staging: Path, *, offline: bool, cache_root: Path | None = None
+) -> dict[str, str]:
     """Build an allowlisted environment; no user Python/package/network config survives."""
 
     environment: dict[str, str] = {}
@@ -462,7 +519,7 @@ def isolated_environment(staging: Path, *, offline: bool) -> dict[str, str]:
         {
             "PYTHONNOUSERSITE": "1",
             "PYTHONUTF8": "1",
-            "UV_CACHE_DIR": str(staging / ".uv-cache"),
+            "UV_CACHE_DIR": str((cache_root or staging / ".uv-cache").resolve()),
             "UV_PROJECT_ENVIRONMENT": str(staging / ".venv"),
             "UV_NO_CONFIG": "1",
             "UV_NO_PYTHON_DOWNLOADS": "1",
@@ -495,6 +552,30 @@ class RuntimeInstaller:
     def runtime_path(self) -> Path:
         return self.runtimes_root / self.bundle.identity.runtime_id
 
+    def validate_existing(self, cancellation: CancellationToken | None = None) -> Path:
+        """Validate and return the published Runtime for this exact bundle identity."""
+
+        cancellation = cancellation or CancellationToken()
+        directory = self.runtime_path
+        if not directory.is_dir() or directory.is_symlink():
+            raise RuntimeSetupError(
+                f"Worker Runtime {self.bundle.identity.runtime_id} is not published"
+            )
+        try:
+            ready = json.loads((directory / "READY.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeSetupError("Published Worker Runtime has no valid READY record") from exc
+        if (
+            not isinstance(ready, dict)
+            or set(ready) != {"runtime_id", "python", "worker", "published_at"}
+            or ready.get("runtime_id") != self.bundle.identity.runtime_id
+            or ready.get("python") != PYTHON_VERSION
+            or ready.get("worker") != f"{WORKER_DISTRIBUTION}=={WORKER_VERSION}"
+        ):
+            raise RuntimeSetupError("Published Worker Runtime READY identity does not match")
+        self._validate_runtime(directory, cancellation)
+        return directory
+
     def setup(
         self,
         *,
@@ -505,6 +586,10 @@ class RuntimeInstaller:
         cancellation = cancellation or CancellationToken()
         if cancellation.cancelled:
             raise SetupCancelled("Runtime Setup was cancelled before it started")
+        if not offline and not online_access:
+            raise RuntimeSetupError(
+                "Blender Online Access is disabled. Enable it or use explicit Offline Setup."
+            )
         artifacts = self.artifact_store.acquire(
             self.bundle.artifacts,
             offline=offline,
@@ -538,7 +623,9 @@ class RuntimeInstaller:
                 self.bundle.copy_payload(staging)
                 uv = self._extract_uv(artifacts["uv"], staging)
                 python = self._extract_python(artifacts["python"], staging)
-                environment = isolated_environment(staging, offline=offline)
+                environment = isolated_environment(
+                    staging, offline=offline, cache_root=self.managed_root / "uv-cache"
+                )
                 uv_version = str(
                     next(item.metadata["version"] for item in self.bundle.artifacts if item.name == "uv")
                 )
@@ -548,7 +635,7 @@ class RuntimeInstaller:
                 if not result.stdout.startswith(f"uv {uv_version} "):
                     raise RuntimeSetupError(f"Private uv validation failed: {result.stdout.strip()}")
                 command = [
-                    str(uv), "sync", "--frozen", "--no-dev", "--no-config", "--no-index",
+                    str(uv), "sync", "--frozen", "--no-dev", "--no-config",
                     "--managed-python", "--no-python-downloads", "--python", str(python),
                 ]
                 if offline:
@@ -619,7 +706,9 @@ class RuntimeInstaller:
         python = directory / "py" / "python" / ("python.exe" if os.name == "nt" else "bin/python3")
         if not python.is_file():
             raise RuntimeSetupError("Runtime does not contain exactly one managed CPython interpreter")
-        environment = isolated_environment(directory, offline=True)
+        environment = isolated_environment(
+            directory, offline=True, cache_root=self.managed_root / "uv-cache"
+        )
         probe = (
             "import json,platform,struct,sys;"
             "print(json.dumps({'version':platform.python_version(),'bits':struct.calcsize('P')*8,'exe':sys.executable}))"
@@ -641,12 +730,13 @@ class RuntimeInstaller:
         if identity != {"distribution": WORKER_DISTRIBUTION, "version": WORKER_VERSION}:
             raise RuntimeSetupError(f"Worker package validation failed: {identity}")
         inventory_probe = (
-            "import importlib.metadata,json;"
-            "print(json.dumps(sorted((d.metadata['Name'].lower(),d.version) for d in importlib.metadata.distributions())))"
+            "import importlib.metadata,json,re;"
+            "print(json.dumps(sorted((re.sub(r'[-_.]+','-',d.metadata['Name'].lower()),d.version) for d in importlib.metadata.distributions())))"
         )
         result = self.runner.run([str(virtual_python), "-I", "-c", inventory_probe], cwd=directory, env=environment, cancellation=cancellation)
         inventory = json.loads(result.stdout.strip())
-        if inventory != [[WORKER_DISTRIBUTION, WORKER_VERSION]]:
+        expected_inventory = [list(item) for item in self.bundle.expected_inventory]
+        if inventory != expected_inventory:
             raise RuntimeSetupError(f"Unexpected Runtime package inventory: {inventory}")
 
     def _retain_stale_staging(self, previous_owner: Mapping[str, object] | None) -> None:

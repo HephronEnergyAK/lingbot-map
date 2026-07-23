@@ -192,6 +192,8 @@ class RegistrationTests(unittest.TestCase):
         self.bpy, self.registration = install_fake_bpy()
         self.extension = importlib.import_module("blender_extension")
         self.host = importlib.import_module("blender_extension.host")
+        self.ui = importlib.import_module("blender_extension.ui")
+        self.gpu_capability = importlib.import_module("blender_extension.gpu_capability")
 
     def tearDown(self):
         try:
@@ -267,6 +269,8 @@ class RegistrationTests(unittest.TestCase):
                 "lingbot_map.download_model",
                 "lingbot_map.import_model",
                 "lingbot_map.cancel_model_setup",
+                "lingbot_map.test_gpu_profiles",
+                "lingbot_map.cancel_gpu_profiles",
             ],
         )
         self.assertEqual([panel.bl_order for panel in panels], [0, 1, 2, 3, 4])
@@ -290,7 +294,7 @@ class RegistrationTests(unittest.TestCase):
         )
         panel = setup_panel_class()
         panel.layout = FakeLayout()
-        preferences = SimpleNamespace(runtime_root="", offline_setup=True)
+        preferences = SimpleNamespace(runtime_root="", gpu_uuid="", offline_setup=True)
         context = SimpleNamespace(
             preferences=SimpleNamespace(
                 addons={"blender_extension": SimpleNamespace(preferences=preferences)}
@@ -308,6 +312,78 @@ class RegistrationTests(unittest.TestCase):
         self.assertTrue(any("ab9c34c64c3d8212" in label for label in labels))
         self.assertEqual(operators.count("lingbot_map.download_model"), 2)
         self.assertEqual(operators.count("lingbot_map.import_model"), 2)
+
+    def test_gpu_test_persists_only_unambiguous_physical_uuid_before_nonmodal_start(self):
+        with mock.patch.object(
+            self.extension, "probe_supported_host", return_value=self.supported_decision()
+        ):
+            self.extension.register()
+        operator_class = next(
+            item for item in self.extension.CLASSES
+            if item.__name__ == "LINGBOTMAP_OT_test_gpu_profiles"
+        )
+        operator = operator_class()
+        preferences = SimpleNamespace(runtime_root="", gpu_uuid="", offline_setup=True)
+        context = SimpleNamespace(
+            preferences=SimpleNamespace(
+                addons={"blender_extension": SimpleNamespace(preferences=preferences)}
+            )
+        )
+        device = self.gpu_capability.GpuDevice(
+            "GPU-12345678", "Test GPU", 16 * 1024**3, "610.47", (12, 0)
+        )
+        with (
+            mock.patch.object(self.ui, "discover_physical_gpus", return_value=(device,)),
+            mock.patch.object(self.ui, "start_gpu_capability") as start,
+        ):
+            self.assertEqual(operator.execute(context), {"FINISHED"})
+        self.assertEqual(preferences.gpu_uuid, device.uuid)
+        start.assert_called_once_with(mock.ANY, device.uuid)
+
+    def test_gpu_selection_rejects_ordinal_and_ambiguous_auto_selection(self):
+        first = self.gpu_capability.GpuDevice(
+            "GPU-12345678", "First", 1, "1", (1, 0)
+        )
+        second = self.gpu_capability.GpuDevice(
+            "GPU-abcdefgh", "Second", 1, "1", (1, 0)
+        )
+        with self.assertRaisesRegex(self.gpu_capability.GpuCapabilityError, "physical UUID"):
+            self.gpu_capability.select_gpu_uuid((first,), "0")
+        with self.assertRaisesRegex(self.gpu_capability.GpuCapabilityError, "Multiple"):
+            self.gpu_capability.select_gpu_uuid((first, second), "")
+
+    def test_gpu_worker_environment_is_isolated_and_windows_getuser_safe(self):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "USERNAME": "poisoned-user",
+                "PYTHONPATH": r"C:\poisoned",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "LOCALAPPDATA": r"C:\local",
+                "SystemRoot": r"C:\Windows",
+            },
+            clear=True,
+        ):
+            environment = self.gpu_capability._worker_environment()
+        self.assertEqual(environment["USERNAME"], "LingBotMapWorker")
+        self.assertEqual(environment["LOCALAPPDATA"], r"C:\local")
+        self.assertNotIn("PYTHONPATH", environment)
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", environment)
+
+    def test_atomic_status_permission_race_is_transient_not_terminal(self):
+        def racing_read(_path):
+            try:
+                raise PermissionError("atomic replace in progress")
+            except PermissionError as exc:
+                raise self.gpu_capability.GpuCapabilityError(
+                    "Cannot parse GPU capability JSON"
+                ) from exc
+
+        with mock.patch.object(self.gpu_capability, "_read_json", side_effect=racing_read):
+            with self.assertRaises(self.gpu_capability.TransientStatusRead):
+                self.gpu_capability._status_snapshot(
+                    Path("status.json"), "cap-test123", "GPU-12345678"
+                )
 
 
 if __name__ == "__main__":

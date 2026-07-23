@@ -17,6 +17,13 @@ from .runtime import (
 )
 from .model_store import ModelStore, bundled_model_catalog
 from .runtime_setup import RuntimeSetupError, default_managed_root
+from .gpu_capability import (
+    cancel_gpu_capability,
+    discover_physical_gpus,
+    get_capability_snapshot,
+    select_gpu_uuid,
+    start_gpu_capability,
+)
 
 
 class LINGBOTMAP_Preferences(bpy.types.AddonPreferences):
@@ -32,7 +39,7 @@ class LINGBOTMAP_Preferences(bpy.types.AddonPreferences):
     )
     gpu_uuid: StringProperty(
         name="GPU UUID",
-        description="Persistent machine-specific NVIDIA GPU selection",
+        description="Persistent NVML physical GPU UUID; mutable CUDA ordinals are never stored",
         default="",
     )
     offline_setup: BoolProperty(
@@ -172,6 +179,49 @@ class LINGBOTMAP_OT_cancel_model_setup(bpy.types.Operator):
         return {"FINISHED"} if cancel_model_setup() else {"CANCELLED"}
 
 
+class LINGBOTMAP_OT_test_gpu_profiles(bpy.types.Operator):
+    bl_idname = "lingbot_map.test_gpu_profiles"
+    bl_label = "Test GPU Profiles"
+    bl_description = "Qualify Draft, Balanced, and High on one physical GPU UUID"
+
+    @classmethod
+    def poll(cls, _context):
+        decision = get_host_decision()
+        return bool(
+            decision
+            and decision.supported
+            and get_capability_snapshot().state
+            not in {"preparing", "running", "cancelling"}
+        )
+
+    def execute(self, context):
+        preferences = _preferences(context)
+        root = _managed_root(preferences)
+        try:
+            devices = discover_physical_gpus(root)
+            selected = select_gpu_uuid(devices, preferences.gpu_uuid.strip())
+            # Blender persists AddonPreferences; only an unambiguous physical UUID
+            # may be selected automatically.
+            preferences.gpu_uuid = selected
+            start_gpu_capability(root, selected)
+        except RuntimeSetupError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_cancel_gpu_profiles(bpy.types.Operator):
+    bl_idname = "lingbot_map.cancel_gpu_profiles"
+    bl_label = "Cancel GPU Profile Test"
+
+    @classmethod
+    def poll(cls, _context):
+        return get_capability_snapshot().state in {"preparing", "running", "cancelling"}
+
+    def execute(self, _context):
+        return {"FINISHED"} if cancel_gpu_capability() else {"CANCELLED"}
+
+
 class _LINGBOTMAP_LifecyclePanel:
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -246,7 +296,39 @@ class LINGBOTMAP_PT_setup(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                 text=model_snapshot.message,
                 icon="CHECKMARK" if model_snapshot.state == "ready" else "ERROR",
             )
-        layout.label(text="GPU Profiles: Not tested")
+        capability = get_capability_snapshot()
+        selected_uuid = getattr(preferences, "gpu_uuid", "").strip()
+        layout.label(
+            text=f"Physical GPU: {selected_uuid or 'not selected'}",
+            icon="CHECKMARK" if selected_uuid else "INFO",
+        )
+        capability_icon = (
+            "CHECKMARK" if capability.state == "succeeded"
+            else "ERROR" if capability.state in {"failed", "blocked", "cancelled"}
+            else "INFO"
+        )
+        layout.label(text=capability.message, icon=capability_icon)
+        if capability.state in {"preparing", "running", "cancelling"}:
+            if capability.total:
+                layout.label(
+                    text=(
+                        f"{capability.phase or 'starting'}: "
+                        f"{capability.completed}/{capability.total}"
+                    )
+                )
+            layout.operator(LINGBOTMAP_OT_cancel_gpu_profiles.bl_idname)
+        else:
+            layout.operator(LINGBOTMAP_OT_test_gpu_profiles.bl_idname)
+        for result in capability.results:
+            identity = result.get("identity", {})
+            name = identity.get("profile_name", "Unknown") if isinstance(identity, dict) else "Unknown"
+            state = str(result.get("state", "unknown"))
+            required = int(result.get("required_free_bytes", 0))
+            peak = int(result.get("measured_peak_bytes", 0))
+            layout.label(
+                text=f"{name}: {state} (peak {peak:,} B; required {required:,} B)",
+                icon="CHECKMARK" if state == "qualified" else "ERROR",
+            )
 
 
 class LINGBOTMAP_PT_reconstruct(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
@@ -297,6 +379,8 @@ CLASSES = (
     LINGBOTMAP_OT_download_model,
     LINGBOTMAP_OT_import_model,
     LINGBOTMAP_OT_cancel_model_setup,
+    LINGBOTMAP_OT_test_gpu_profiles,
+    LINGBOTMAP_OT_cancel_gpu_profiles,
     LINGBOTMAP_PT_setup,
     LINGBOTMAP_PT_reconstruct,
     LINGBOTMAP_PT_active_job,
