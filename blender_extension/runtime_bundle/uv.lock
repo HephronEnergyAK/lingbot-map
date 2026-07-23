@@ -1,0 +1,22 @@
+version = 1
+revision = 3
+requires-python = "==3.10.20"
+
+[[package]]
+name = "lingbot-map-runtime"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "lingbot-map-worker" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "lingbot-map-worker", path = "wheels/lingbot_map_worker-0.1.0-py3-none-any.whl" }]
+
+[[package]]
+name = "lingbot-map-worker"
+version = "0.1.0"
+source = { path = "wheels/lingbot_map_worker-0.1.0-py3-none-any.whl" }
+wheels = [
+    { filename = "lingbot_map_worker-0.1.0-py3-none-any.whl", hash = "sha256:37a9b96ecccedf7bee0acc45448887ab201227dc378a127aaa43605f383452f1" },
+]

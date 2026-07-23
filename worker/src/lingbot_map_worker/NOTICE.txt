@@ -1,0 +1,4 @@
+LingBot Map Worker
+Copyright 2026 LingBot Map Contributors
+
+Licensed under the Apache License, Version 2.0.

@@ -1,0 +1,11 @@
+[project]
+name = "lingbot-map-runtime"
+version = "0.1.0"
+requires-python = "==3.10.20"
+dependencies = ["lingbot-map-worker==0.1.0"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+lingbot-map-worker = { path = "wheels/lingbot_map_worker-0.1.0-py3-none-any.whl" }

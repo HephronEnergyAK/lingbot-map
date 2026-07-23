@@ -34,6 +34,7 @@ def install_fake_bpy(version=(5, 2, 1)):
     bpy.app = SimpleNamespace(version=version, online_access=False)
     bpy.types = SimpleNamespace(
         AddonPreferences=type("AddonPreferences", (), {}),
+        Operator=type("Operator", (), {}),
         Panel=type("Panel", (), {}),
     )
     bpy.utils = registration
@@ -231,9 +232,14 @@ class RegistrationTests(unittest.TestCase):
     def test_lifecycle_panels_are_ordered_and_machine_settings_stay_in_preferences(self):
         classes = self.extension.CLASSES
         preferences = classes[0]
-        panels = classes[1:]
+        operators = classes[1:3]
+        panels = classes[3:]
 
         self.assertEqual(preferences.__name__, "LINGBOTMAP_Preferences")
+        self.assertEqual(
+            [operator.bl_idname for operator in operators],
+            ["lingbot_map.setup_runtime", "lingbot_map.cancel_runtime_setup"],
+        )
         self.assertEqual([panel.bl_order for panel in panels], [0, 1, 2, 3, 4])
         self.assertEqual(
             [panel.bl_label for panel in panels],

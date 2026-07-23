@@ -1,0 +1,20 @@
+{
+  "catalog_version": "1.0.0",
+  "uv": {
+    "version": "0.11.16",
+    "filename": "uv-x86_64-pc-windows-msvc.zip",
+    "url": "https://github.com/astral-sh/uv/releases/download/0.11.16/uv-x86_64-pc-windows-msvc.zip",
+    "length": 23236992,
+    "sha256": "dd9d6d6554bfab265bfa98aa8e8a406c5c3a7b97582f93de1f4d48d9154a0395"
+  },
+  "python": {
+    "implementation": "cpython",
+    "version": "3.10.20",
+    "build": "20260510",
+    "key": "cpython-3.10.20-windows-x86_64-none",
+    "filename": "cpython-3.10.20+20260510-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260510/cpython-3.10.20%2B20260510-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+    "length": 22259051,
+    "sha256": "d1e8fb30cba04e6bb5a703e0186da77f833957de027562fa4df9fd0424ae5f7e"
+  }
+}

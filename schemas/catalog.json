@@ -1,0 +1,11 @@
+{
+  "catalog_version": "1.0.0",
+  "contracts": [
+    {
+      "id": "runtime-identity",
+      "version": "1.0.0",
+      "path": "runtime-identity.schema.json",
+      "sha256": "a1b23a25008d33d1a485ce130321080b4463d6113add0342b8fe538f7d51b219"
+    }
+  ]
+}
