@@ -39,6 +39,12 @@ def main() -> int:
         metavar="JOB_SPEC",
         help="Preflight one complete Capture Source from an immutable JobSpec",
     )
+    parser.add_argument(
+        "--result-fixture-job",
+        type=Path,
+        metavar="JOB_SPEC",
+        help="Build one deterministic CPU Reconstruction Result fixture",
+    )
     parser.add_argument("--job-nonce", help=argparse.SUPPRESS)
     arguments = parser.parse_args()
     if arguments.identity:
@@ -64,6 +70,12 @@ def main() -> int:
         from .preflight_job import run_preflight_job
 
         return run_preflight_job(arguments.preflight_job, arguments.job_nonce)
+    if arguments.result_fixture_job is not None:
+        if not arguments.job_nonce:
+            parser.error("--result-fixture-job requires --job-nonce")
+        from .result_fixture_job import run_result_fixture_job
+
+        return run_result_fixture_job(arguments.result_fixture_job, arguments.job_nonce)
     parser.error("a validated Job Control Envelope is required")
     return 2
 

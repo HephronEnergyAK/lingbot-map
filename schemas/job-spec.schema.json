@@ -6,8 +6,9 @@
   "additionalProperties": false,
   "required": ["schema_version", "job_id", "target_scene", "timeline_start", "project_root"],
   "oneOf": [
-    {"required": ["fixture"], "not": {"required": ["capture_source"]}},
-    {"required": ["capture_source"], "not": {"required": ["fixture"]}}
+    {"required": ["fixture"], "not": {"anyOf": [{"required": ["capture_source"]}, {"required": ["result_fixture"]}]}},
+    {"required": ["capture_source"], "not": {"anyOf": [{"required": ["fixture"]}, {"required": ["result_fixture"]}]}},
+    {"required": ["result_fixture"], "not": {"anyOf": [{"required": ["fixture"]}, {"required": ["capture_source"]}]}}
   ],
   "properties": {
     "schema_version": {"const": "1.0.0"},
@@ -16,7 +17,8 @@
     "timeline_start": {"type": "integer", "minimum": -1048574, "maximum": 1048574},
     "project_root": {"type": "string", "minLength": 1, "maxLength": 32767},
     "fixture": {"$ref": "#/$defs/fixture"},
-    "capture_source": {"$ref": "#/$defs/capture_source"}
+    "capture_source": {"$ref": "#/$defs/capture_source"},
+    "result_fixture": {"$ref": "#/$defs/result_fixture"}
   },
   "$defs": {
     "target_scene": {
@@ -48,6 +50,21 @@
         "scene_relative_path": {"type": ["string", "null"], "minLength": 3, "maxLength": 32767, "pattern": "^//"},
         "size_bytes": {"type": "integer", "minimum": 1},
         "modification_time_ns": {"type": "integer", "minimum": 1}
+      }
+    },
+    "result_fixture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["absolute_path", "scene_relative_path", "size_bytes", "modification_time_ns", "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget", "initial_voxel_edge_length", "heartbeat_interval_seconds"],
+      "properties": {
+        "absolute_path": {"type": "string", "minLength": 1, "maxLength": 32767},
+        "scene_relative_path": {"type": ["string", "null"], "minLength": 3, "maxLength": 32767, "pattern": "^//"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "modification_time_ns": {"type": "integer", "minimum": 1},
+        "confidence_cutoff_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "depth_cutoff_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "import_point_budget": {"type": "integer", "minimum": 1, "maximum": 50000000},
+        "initial_voxel_edge_length": {"type": "number", "exclusiveMinimum": 0},
+        "heartbeat_interval_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 5}
       }
     }
   }

@@ -34,6 +34,7 @@ from .job_lifecycle import (
     start_fixture_job,
     start_preflight_job,
 )
+from .results import discover_ready_results
 
 
 class LINGBOTMAP_Preferences(bpy.types.AddonPreferences):
@@ -508,8 +509,18 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
     bl_label = "Results"
     bl_order = 3
 
-    def draw(self, _context):
-        self.layout.label(text="No Reconstruction Results discovered")
+    def draw(self, context):
+        blend_path = getattr(bpy.data, "filepath", "")
+        scene_uuid = context.scene.get("lingbot_map_scene_uuid") if blend_path else None
+        results = discover_ready_results(blend_path, scene_uuid=scene_uuid) if blend_path else ()
+        if not results:
+            self.layout.label(text="No Reconstruction Results discovered")
+            return
+        for result in results:
+            box = self.layout.box()
+            box.label(text="Ready", icon="CHECKMARK")
+            box.label(text=f"{result.profile_name}: {result.point_count:,} points")
+            box.label(text=f"{result.frame_count:,} frames · {result.result_id}")
 
 
 class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):

@@ -47,6 +47,7 @@ from blender_extension.job_lifecycle import (
     validate_status,
     WorkerRecord,
 )
+from blender_extension.results import discover_ready_results
 
 JOB_LIFECYCLE_MODULE = sys.modules[JobController.__module__]
 IPC_MODULE = sys.modules[parse_json_bytes.__module__]
@@ -161,7 +162,10 @@ class ProjectBindingTests(unittest.TestCase):
 
     def test_all_job_schema_contracts_begin_at_1_0_0(self):
         root = Path(__file__).resolve().parents[1]
-        names = ("job-spec", "job-control", "job-event", "job-status", "preflight-result")
+        names = (
+            "job-spec", "job-control", "job-event", "job-status",
+            "preflight-result", "reconstruction-result",
+        )
         for name in names:
             document = json.loads((root / "schemas" / f"{name}.schema.json").read_text(encoding="utf-8"))
             self.assertEqual(document["properties"]["schema_version"]["const"], "1.0.0")
@@ -277,6 +281,102 @@ class ProjectBindingTests(unittest.TestCase):
             self.assertEqual(captured["command"][4], "--preflight-job")
             source.write_bytes(b"replacement")
             self.assertEqual(read_json(spec_path)["capture_source"], frozen)
+
+    def test_result_fixture_launch_freezes_profile_source_and_uses_dedicated_runner(self):
+        class FakeProcess:
+            pid = 123
+            stdout = io.BytesIO()
+            def poll(self):
+                return None
+            def kill(self):
+                pass
+            def wait(self, timeout=None):
+                return 0
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            (runtime / "empty-cwd").mkdir(parents=True)
+            python = runtime / "python.exe"
+            python.touch()
+            blend = root / "target.blend"
+            blend.touch()
+            source = root / "capture.mp4"
+            source.write_bytes(b"result fixture identity")
+            captured = {}
+            def popen(command, **_kwargs):
+                captured["command"] = command
+                return FakeProcess()
+            controller = JobController()
+            controller._start_threads = lambda _active: None
+            record = WorkerRecord(123, 456, str(python), "a" * 64, "b" * 32)
+            with (
+                mock.patch.object(JOB_LIFECYCLE_MODULE, "_runtime_command", return_value=(runtime, python, "c" * 64, "d" * 64)),
+                mock.patch.object(JOB_LIFECYCLE_MODULE, "_wait_for_worker_record", return_value=record),
+                mock.patch.object(JOB_LIFECYCLE_MODULE.subprocess, "Popen", side_effect=popen),
+            ):
+                job_id = controller.launch_result_fixture(
+                    managed_root=root,
+                    blend_path=blend,
+                    scene_uuid="12345678-1234-1234-1234-123456789abc",
+                    scene_name="Scene",
+                    timeline_start=9,
+                    capture_draft_path="//capture.mp4",
+                    import_point_budget=17,
+                )
+            spec = read_json(project_result_root(blend) / ".jobs" / job_id / "job-spec.json")
+            self.assertEqual(spec["result_fixture"]["size_bytes"], len(b"result fixture identity"))
+            self.assertEqual(spec["result_fixture"]["import_point_budget"], 17)
+            self.assertEqual(captured["command"][4], "--result-fixture-job")
+
+    def test_results_panel_discovery_only_returns_complete_matching_publications(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            blend = root / "target.blend"
+            blend.touch()
+            results = ensure_project_layout(blend) / "results"
+            directory = results / "20260723010203Z-11111111"
+            directory.mkdir()
+            arrays = {}
+            names = {
+                "positions", "colors", "confidence", "radius", "source_frame",
+                "camera_to_world", "model_intrinsics", "source_intrinsics",
+                "model_fov_radians", "source_pts_seconds", "source_to_model", "frame_type",
+            }
+            for name in names:
+                path = directory / "arrays" / f"{name}.npy"
+                path.parent.mkdir(exist_ok=True)
+                path.write_bytes(b"npy")
+                arrays[name] = {
+                    "path": f"arrays/{name}.npy", "dtype": "|u1", "shape": [3],
+                    "byte_length": 3, "sha256": "a" * 64,
+                }
+            log = directory / "logs" / "worker.log"
+            log.parent.mkdir()
+            log.write_bytes(b"")
+            manifest = {
+                "schema_version": "1.0.0", "result_id": "result-" + "2" * 32,
+                "job_id": "job-" + "1" * 32, "created_utc": "2026-07-23T01:02:03+00:00",
+                "target_scene": {"blend_path": str(blend), "scene_uuid": "12345678-1234-1234-1234-123456789abc", "scene_name": "Scene"},
+                "timeline_start": 1, "source": {}, "contracts": {},
+                "profile": {"name": "Fixture", "confidence_cutoff_percent": 50, "depth_cutoff_percent": 99.5, "import_point_budget": 8},
+                "coordinate_system": {}, "counts": {"frames": 2, "points": 5},
+                "arrays": arrays, "confidence_statistics": {}, "warnings": [], "provenance": {},
+                "logs": [{"path": "logs/worker.log", "byte_length": 0, "sha256": "a" * 64}],
+            }
+            atomic_write_json(directory / "manifest.json", manifest)
+            ready = discover_ready_results(
+                blend, scene_uuid="12345678-1234-1234-1234-123456789abc"
+            )
+            self.assertEqual(len(ready), 1)
+            self.assertEqual((ready[0].point_count, ready[0].frame_count), (5, 2))
+            self.assertEqual(
+                discover_ready_results(blend, scene_uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                (),
+            )
+            arrays["positions"]["path"] = "../outside.npy"
+            atomic_write_json(directory / "manifest.json", manifest)
+            self.assertEqual(discover_ready_results(blend), ())
 
 
 if __name__ == "__main__":

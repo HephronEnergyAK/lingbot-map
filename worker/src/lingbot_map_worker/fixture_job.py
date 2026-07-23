@@ -85,7 +85,7 @@ def _target(value: Any) -> dict[str, Any]:
 def validate_job_spec(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise IpcError("JobSpec has unknown or missing fields")
-    job_kinds = {name for name in ("fixture", "capture_source") if name in value}
+    job_kinds = {name for name in ("fixture", "capture_source", "result_fixture") if name in value}
     if len(job_kinds) != 1 or set(value) != COMMON_JOB_FIELDS | job_kinds:
         raise IpcError("JobSpec must contain exactly one supported Job kind")
     job = require_schema(value, COMMON_JOB_FIELDS | job_kinds, label="JobSpec")
@@ -110,7 +110,7 @@ def validate_job_spec(value: Any) -> dict[str, Any]:
         freeze = fixture["freeze_heartbeat_after_sequence"]
         if freeze is not None:
             _integer(freeze, "fixture.freeze_heartbeat_after_sequence", 1)
-    else:
+    elif "capture_source" in job:
         capture = require_exact_object(
             job["capture_source"],
             {"draft_path", "absolute_path", "scene_relative_path", "size_bytes", "modification_time_ns"},
@@ -128,6 +128,58 @@ def validate_job_spec(value: Any) -> dict[str, Any]:
             raise IpcError("Capture Source scene-relative path is invalid")
         _integer(capture["size_bytes"], "capture_source.size_bytes", 1)
         _integer(capture["modification_time_ns"], "capture_source.modification_time_ns", 1)
+    else:
+        fixture = require_exact_object(
+            job["result_fixture"],
+            {
+                "absolute_path", "scene_relative_path", "size_bytes",
+                "modification_time_ns", "confidence_cutoff_percent",
+                "depth_cutoff_percent", "import_point_budget",
+                "initial_voxel_edge_length", "heartbeat_interval_seconds",
+            },
+            label="result_fixture",
+        )
+        absolute = Path(
+            require_text(
+                fixture["absolute_path"],
+                label="result_fixture.absolute_path",
+                maximum=32767,
+            )
+        )
+        if not absolute.is_absolute():
+            raise IpcError("Result Fixture source path must be absolute")
+        relative = fixture["scene_relative_path"]
+        if relative is not None and (
+            not isinstance(relative, str)
+            or not relative.startswith("//")
+            or len(relative.encode("utf-8")) > 32767
+        ):
+            raise IpcError("Result Fixture scene-relative path is invalid")
+        _integer(fixture["size_bytes"], "result_fixture.size_bytes", 1)
+        _integer(
+            fixture["modification_time_ns"],
+            "result_fixture.modification_time_ns", 1,
+        )
+        _finite(
+            fixture["confidence_cutoff_percent"],
+            "result_fixture.confidence_cutoff_percent", 0, 100,
+        )
+        _finite(
+            fixture["depth_cutoff_percent"],
+            "result_fixture.depth_cutoff_percent", 0, 100,
+        )
+        _integer(
+            fixture["import_point_budget"],
+            "result_fixture.import_point_budget", 1, 50_000_000,
+        )
+        _finite(
+            fixture["initial_voxel_edge_length"],
+            "result_fixture.initial_voxel_edge_length", 1e-12, 1e12,
+        )
+        _finite(
+            fixture["heartbeat_interval_seconds"],
+            "result_fixture.heartbeat_interval_seconds", 0.001, 5,
+        )
     return job
 
 

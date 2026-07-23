@@ -518,6 +518,76 @@ class JobController:
             scene_uuid=scene_uuid, starting_message="Capture Source preflight is starting",
         )
 
+    def launch_result_fixture(
+        self,
+        *,
+        managed_root: Path,
+        blend_path: str | Path,
+        scene_uuid: str,
+        scene_name: str,
+        timeline_start: int,
+        capture_draft_path: str,
+        confidence_cutoff_percent: float = 50.0,
+        depth_cutoff_percent: float = 99.5,
+        import_point_budget: int = 8,
+        initial_voxel_edge_length: float = 0.01,
+    ) -> str:
+        """Launch the deterministic CPU Result fixture used by acceptance tests."""
+        if self.has_active_job():
+            raise JobLifecycleError("This Blender process already launched an active Worker")
+        target = normalized_blend_path(blend_path)
+        if not target.is_file():
+            raise JobLifecycleError("Target Scene .blend file does not exist on disk")
+        source = normalized_capture_source(capture_draft_path, target)
+        frozen_stat = source.stat()
+        if frozen_stat.st_size < 1:
+            raise JobLifecycleError("Result Fixture source is empty")
+        root = ensure_project_layout(target)
+        if _active_children(root):
+            raise JobLifecycleError("This Project Result Root already contains an active Job")
+        runtime, python, runtime_id, _lock_sha = _runtime_command(managed_root)
+        trusted_cwd = runtime / "empty-cwd"
+        if not trusted_cwd.is_dir() or trusted_cwd.is_symlink() or any(trusted_cwd.iterdir()):
+            raise JobLifecycleError("Worker Runtime trusted working directory is absent or not empty")
+        job_id = f"job-{uuid.uuid4().hex}"
+        job_dir = root / ".jobs" / job_id
+        job_dir.mkdir()
+        target_scene = {
+            "blend_path": str(target),
+            "scene_uuid": str(uuid.UUID(scene_uuid)),
+            "scene_name": scene_name,
+        }
+        job_spec = {
+            "schema_version": SCHEMA_VERSION,
+            "job_id": job_id,
+            "target_scene": target_scene,
+            "timeline_start": int(timeline_start),
+            "project_root": str(root),
+            "result_fixture": {
+                "absolute_path": str(source),
+                "scene_relative_path": scene_relative_capture_path(source, target),
+                "size_bytes": int(frozen_stat.st_size),
+                "modification_time_ns": int(frozen_stat.st_mtime_ns),
+                "confidence_cutoff_percent": float(confidence_cutoff_percent),
+                "depth_cutoff_percent": float(depth_cutoff_percent),
+                "import_point_budget": int(import_point_budget),
+                "initial_voxel_edge_length": float(initial_voxel_edge_length),
+                "heartbeat_interval_seconds": 0.1,
+            },
+        }
+        return self._launch_spec(
+            runtime=runtime,
+            python=python,
+            runtime_id=runtime_id,
+            trusted_cwd=trusted_cwd,
+            job_dir=job_dir,
+            job_spec=job_spec,
+            worker_argument="--result-fixture-job",
+            target=target,
+            scene_uuid=scene_uuid,
+            starting_message="Result Fixture Job is starting",
+        )
+
     def _launch_spec(
         self,
         *,
@@ -864,6 +934,10 @@ def start_fixture_job(**kwargs) -> str:
 
 def start_preflight_job(**kwargs) -> str:
     return _controller.launch_preflight(**kwargs)
+
+
+def start_result_fixture_job(**kwargs) -> str:
+    return _controller.launch_result_fixture(**kwargs)
 
 
 def cancel_active_job() -> bool:

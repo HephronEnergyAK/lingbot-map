@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lingbot-map.invalid/schemas/reconstruction-result/1.0.0",
+  "title": "LingBot Map Reconstruction Result 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "result_id", "job_id", "created_utc", "target_scene", "timeline_start", "source", "contracts", "profile", "coordinate_system", "counts", "arrays", "confidence_statistics", "warnings", "provenance", "logs"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "result_id": {"type": "string", "pattern": "^result-[0-9a-f]{32}$"},
+    "job_id": {"type": "string", "pattern": "^job-[0-9a-f]{32}$"},
+    "created_utc": {"type": "string", "format": "date-time", "maxLength": 128},
+    "target_scene": {
+      "type": "object", "additionalProperties": false,
+      "required": ["blend_path", "scene_uuid", "scene_name"],
+      "properties": {
+        "blend_path": {"type": "string", "minLength": 1, "maxLength": 32767},
+        "scene_uuid": {"type": "string", "format": "uuid"},
+        "scene_name": {"type": "string", "minLength": 1, "maxLength": 1024}
+      }
+    },
+    "timeline_start": {"type": "integer"},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["absolute_path", "scene_relative_path", "size_bytes", "modification_time_ns", "sha256"],
+      "properties": {
+        "absolute_path": {"type": "string", "minLength": 1, "maxLength": 32767},
+        "scene_relative_path": {"type": ["string", "null"], "pattern": "^//", "maxLength": 32767},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "modification_time_ns": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "contracts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["job_spec", "events", "result"],
+      "properties": {"job_spec": {"const": "1.0.0"}, "events": {"const": "1.0.0"}, "result": {"const": "1.0.0"}}
+    },
+    "profile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "confidence_cutoff_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "depth_cutoff_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "import_point_budget": {"type": "integer", "minimum": 1, "maximum": 50000000}
+      }
+    },
+    "coordinate_system": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "handedness", "camera_local_axes", "voxel_origin", "voxel_edge_length"],
+      "properties": {
+        "name": {"const": "blender-z-up-reconstruction-frame"},
+        "handedness": {"const": "right"},
+        "camera_local_axes": {"const": "+X right,+Y up,-Z forward"},
+        "voxel_origin": {"const": [0.0, 0.0, 0.0]},
+        "voxel_edge_length": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "counts": {
+      "type": "object", "additionalProperties": false, "required": ["frames", "points"],
+      "properties": {"frames": {"type": "integer", "minimum": 1}, "points": {"type": "integer", "minimum": 0}}
+    },
+    "arrays": {
+      "type": "object", "additionalProperties": false,
+      "required": ["positions", "colors", "confidence", "radius", "source_frame", "camera_to_world", "model_intrinsics", "source_intrinsics", "model_fov_radians", "source_pts_seconds", "source_to_model", "frame_type"],
+      "properties": {
+        "positions": {"$ref": "#/$defs/array"}, "colors": {"$ref": "#/$defs/array"},
+        "confidence": {"$ref": "#/$defs/array"}, "radius": {"$ref": "#/$defs/array"},
+        "source_frame": {"$ref": "#/$defs/array"}, "camera_to_world": {"$ref": "#/$defs/array"},
+        "model_intrinsics": {"$ref": "#/$defs/array"}, "source_intrinsics": {"$ref": "#/$defs/array"},
+        "model_fov_radians": {"$ref": "#/$defs/array"}, "source_pts_seconds": {"$ref": "#/$defs/array"},
+        "source_to_model": {"$ref": "#/$defs/array"}, "frame_type": {"$ref": "#/$defs/array"}
+      }
+    },
+    "confidence_statistics": {"$ref": "#/$defs/confidence_statistics"},
+    "warnings": {"type": "array", "items": {"$ref": "#/$defs/warning"}},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "logs": {"type": "array", "items": {"$ref": "#/$defs/file"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "safe_path": {"type": "string", "minLength": 1, "maxLength": 32767, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"},
+    "file": {
+      "type": "object", "additionalProperties": false, "required": ["path", "byte_length", "sha256"],
+      "properties": {"path": {"$ref": "#/$defs/safe_path"}, "byte_length": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "array": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "byte_length", "sha256", "dtype", "shape"],
+      "properties": {
+        "path": {"$ref": "#/$defs/safe_path"}, "byte_length": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "dtype": {"enum": ["<f4", "<f8", "<u4", "|u1"]},
+        "shape": {"type": "array", "maxItems": 4, "items": {"type": "integer", "minimum": 0}}
+      }
+    },
+    "confidence_statistics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["p0", "p5", "p25", "p50", "p75", "p95", "p100"],
+      "properties": {"p0": {"type": ["number", "null"]}, "p5": {"type": ["number", "null"]}, "p25": {"type": ["number", "null"]}, "p50": {"type": ["number", "null"]}, "p75": {"type": ["number", "null"]}, "p95": {"type": ["number", "null"]}, "p100": {"type": ["number", "null"]}}
+    },
+    "warning": {
+      "type": "object", "additionalProperties": false, "required": ["code", "message"],
+      "properties": {"code": {"type": "string", "minLength": 1, "maxLength": 128}, "message": {"type": "string", "minLength": 1, "maxLength": 16384}}
+    },
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["runtime_id", "worker_version", "job_spec_sha256", "model_sha256", "source_sha256", "preprocessing_rule_version", "filtering_rule_version", "point_reducer_rule_version", "resource_estimate_version"],
+      "properties": {
+        "runtime_id": {"$ref": "#/$defs/sha256"}, "worker_version": {"type": "string", "minLength": 1},
+        "job_spec_sha256": {"$ref": "#/$defs/sha256"}, "model_sha256": {"$ref": "#/$defs/sha256"},
+        "source_sha256": {"$ref": "#/$defs/sha256"},
+        "preprocessing_rule_version": {"const": "1.0.0"}, "filtering_rule_version": {"const": "1.0.0"},
+        "point_reducer_rule_version": {"const": "1.0.0"}, "resource_estimate_version": {"const": "1.0.0"}
+      }
+    }
+  }
+}

@@ -17,7 +17,13 @@
       "id": "job-spec",
       "version": "1.0.0",
       "path": "job-spec.schema.json",
-      "sha256": "6762850f8e12d8488f2900ba2ca817acc745ab6e8ff4995ab09d72276aa6f4c2"
+      "sha256": "bfb65487d70c9884ea6ee2969d385cc6a0a35bac0a865aca9008b8c36c531693"
+    },
+    {
+      "id": "reconstruction-result",
+      "version": "1.0.0",
+      "path": "reconstruction-result.schema.json",
+      "sha256": "60d298ec55ed8b2c0a0a47b304c10952e54de50200faeaeaa48898c8dbaf261c"
     },
     {
       "id": "preflight-result",
