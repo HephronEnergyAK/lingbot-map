@@ -108,10 +108,20 @@ class Predictor:
 class Sink:
     def __init__(self):
         self.identities = []
+        self.prepared = {}
+        self.prepared_count = 0
+        self.maximum_prepared = 0
         self.boundaries = []
         self.finished = 0
 
-    def accept(self, prediction, _canonical, pts):
+    def prepare_frame(self, frame_index, canonical):
+        self.prepared[frame_index] = canonical
+        self.prepared_count += 1
+        self.maximum_prepared = max(self.maximum_prepared, len(self.prepared))
+
+    def accept(self, prediction, canonical, pts):
+        if self.prepared.pop(prediction.frame_index, None) is not canonical:
+            raise AssertionError("long Pipeline did not retain the same canonical frame")
         self.identities.append((prediction.frame_index, prediction.frame_type, pts))
 
     def record_window_boundary(self, metrics):
@@ -154,6 +164,9 @@ class LongPipelineTests(unittest.TestCase):
                 self.assertEqual(
                     [item[0] for item in sink.identities], list(range(count))
                 )
+                self.assertEqual(sink.prepared_count, count)
+                self.assertFalse(sink.prepared)
+                self.assertLessEqual(sink.maximum_prepared, 64)
                 self.assertEqual([item[1] for item in sink.identities[:8]], [0] * 8)
                 self.assertTrue(all(item[1] == 1 for item in sink.identities[8:]))
                 self.assertLessEqual(pipeline.maximum_window_frames, 64)

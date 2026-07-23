@@ -17,13 +17,13 @@
       "id": "job-spec",
       "version": "1.0.0",
       "path": "job-spec.schema.json",
-      "sha256": "3210d70787f4354b9f6deacb1856f0413033297afd2a0fbe000b15ac6cd74136"
+      "sha256": "cf91ecfbc7e951052aa094069ea0a0e44f24229d5ffec6f0a4346e40fa42bfbf"
     },
     {
       "id": "reconstruction-result",
       "version": "1.0.0",
       "path": "reconstruction-result.schema.json",
-      "sha256": "82667f65029e83089a280bcd662d33cea731955cd98d5d2ff3f7f8152203aec9"
+      "sha256": "c3e3da692704b1399c422d8b72d7d691cd512d184809f1f4dcf4b2da9875620f"
     },
     {
       "id": "dense-predictions",

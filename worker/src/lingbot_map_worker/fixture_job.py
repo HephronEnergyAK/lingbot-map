@@ -185,14 +185,17 @@ def validate_job_spec(value: Any) -> dict[str, Any]:
             "result_fixture.heartbeat_interval_seconds", 0.001, 5,
         )
     else:
-        reconstruction = require_exact_object(
-            job["reconstruction"],
-            {
+        reconstruction_fields = {
                 "managed_root", "worker_lock_sha256", "source", "preflight", "profile", "gpu", "model",
                 "heartbeat_interval_seconds", "initial_voxel_edge_length",
-            },
-            label="reconstruction",
-        )
+            }
+        reconstruction = job["reconstruction"]
+        if (
+            not isinstance(reconstruction, dict)
+            or not reconstruction_fields.issubset(reconstruction)
+            or not set(reconstruction).issubset(reconstruction_fields | {"sky_mask"})
+        ):
+            raise IpcError("reconstruction has unknown or missing fields")
         managed_root = Path(require_text(
             reconstruction["managed_root"], label="reconstruction.managed_root", maximum=32767
         ))
@@ -288,6 +291,48 @@ def validate_job_spec(value: Any) -> dict[str, Any]:
             raise IpcError("Reconstruction Model path must be absolute")
         if not re.fullmatch(r"[0-9a-f]{64}", require_text(model["sha256"], label="model.sha256", maximum=64)):
             raise IpcError("Reconstruction Model checksum is invalid")
+        sky_mask = reconstruction.get("sky_mask", {"enabled": False})
+        if (
+            not isinstance(sky_mask, dict)
+            or not isinstance(sky_mask.get("enabled"), bool)
+        ):
+            raise IpcError("reconstruction.sky_mask is invalid")
+        if sky_mask["enabled"]:
+            sky_mask = require_exact_object(
+                sky_mask, {"enabled", "model"}, label="reconstruction.sky_mask"
+            )
+            auxiliary = require_exact_object(
+                sky_mask["model"],
+                {"catalog_version", "id", "path", "sha256"},
+                label="reconstruction.sky_mask.model",
+            )
+            require_text(
+                auxiliary["catalog_version"],
+                label="sky_mask.model.catalog_version",
+                maximum=64,
+            )
+            if auxiliary["id"] != "skyseg":
+                raise IpcError("Sky Masking requires the catalogued skyseg model")
+            auxiliary_path = Path(
+                require_text(
+                    auxiliary["path"],
+                    label="sky_mask.model.path",
+                    maximum=32767,
+                )
+            )
+            if not auxiliary_path.is_absolute():
+                raise IpcError("Sky Mask Auxiliary Model path must be absolute")
+            if not re.fullmatch(
+                r"[0-9a-f]{64}",
+                require_text(
+                    auxiliary["sha256"],
+                    label="sky_mask.model.sha256",
+                    maximum=64,
+                ),
+            ):
+                raise IpcError("Sky Mask Auxiliary Model checksum is invalid")
+        elif set(sky_mask) != {"enabled"}:
+            raise IpcError("Disabled Sky Masking cannot name an Auxiliary Model")
         _finite(reconstruction["heartbeat_interval_seconds"], "reconstruction.heartbeat_interval_seconds", 0.001, 5)
         _finite(reconstruction["initial_voxel_edge_length"], "reconstruction.initial_voxel_edge_length", 1e-12, 1e12)
     return job

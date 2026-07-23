@@ -149,6 +149,12 @@ class RuntimeIdentityTests(unittest.TestCase):
         wheel = bundle_root / "wheels" / "lingbot_map_worker-0.1.0-py3-none-any.whl"
         lock = (bundle_root / "uv.lock").read_text(encoding="utf-8")
         self.assertIn(f"sha256:{runtime_setup.sha256_file(wheel)}", lock)
+        inventory = json.loads(
+            (bundle_root / "runtime-inventory.json").read_text(encoding="utf-8")
+        )
+        packages = {item["name"]: item["version"] for item in inventory["packages"]}
+        self.assertEqual(packages["onnxruntime"], "1.23.2")
+        self.assertNotIn("onnxruntime-gpu", packages)
         catalog = json.loads((bundle_root / "schemas" / "catalog.json").read_text(encoding="utf-8"))
         self.assertTrue(catalog["contracts"])
         for contract in catalog["contracts"]:

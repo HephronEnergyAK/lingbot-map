@@ -209,6 +209,9 @@ class WindowedReconstructionPipeline:
                     if cancel():
                         raise PipelineCancelled(f"cancelled before frame {expected_index}")
                     canonical = self.preprocessor(source.srgb)
+                    prepare_frame = getattr(result_sink, "prepare_frame", None)
+                    if callable(prepare_frame):
+                        prepare_frame(expected_index, canonical)
                     current.append(WindowFrame(expected_index, source.pts_seconds, canonical))
                     decoded += 1
                     self.maximum_window_frames = max(

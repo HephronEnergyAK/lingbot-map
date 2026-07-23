@@ -47,6 +47,12 @@ class ProgressEvent:
 
 
 class ResultSink(Protocol):
+    def prepare_frame(
+        self,
+        frame_index: int,
+        canonical: CanonicalImage,
+    ) -> None: ...
+
     def accept(
         self,
         prediction: FramePrediction,
@@ -220,6 +226,9 @@ class ShortReconstructionPipeline:
                         )
                         progress.advance(1, force=True)
                         progress.boundary("inference", 0, frame_count)
+                    prepare_frame = getattr(result_sink, "prepare_frame", None)
+                    if callable(prepare_frame):
+                        prepare_frame(expected_index, canonical)
                     pending[expected_index] = (canonical, source.pts_seconds)
                     self.maximum_pending_colors = max(
                         self.maximum_pending_colors, len(pending)

@@ -102,8 +102,27 @@ class Sink:
     def __init__(self):
         self.predictions = []
         self.finished = 0
+        self.prepared = {}
+        self.prepared_count = 0
+        self.maximum_prepared = 0
 
-    def accept(self, prediction, _canonical, pts):
+    def prepare_frame(self, frame_index, canonical):
+        self.prepared[frame_index] = (
+            canonical,
+            canonical.model_input.copy(),
+            canonical.color_rgb.copy(),
+        )
+        self.prepared_count += 1
+        self.maximum_prepared = max(self.maximum_prepared, len(self.prepared))
+
+    def accept(self, prediction, canonical, pts):
+        prepared, model_before, color_before = self.prepared.pop(
+            prediction.frame_index
+        )
+        if prepared is not canonical:
+            raise AssertionError("Pipeline did not feed the same canonical frame")
+        np.testing.assert_array_equal(canonical.model_input, model_before)
+        np.testing.assert_array_equal(canonical.color_rgb, color_before)
         self.predictions.append((prediction.frame_index, int(prediction.frame_type), pts))
 
     def finish(self):
@@ -230,6 +249,9 @@ class ShortPipelineTests(unittest.TestCase):
                 result, pipeline, sink, backend, factories, _events = self._run(count)
                 self.assertEqual(result, "ready")
                 self.assertEqual(len(sink.predictions), count)
+                self.assertEqual(sink.prepared_count, count)
+                self.assertFalse(sink.prepared)
+                self.assertLessEqual(sink.maximum_prepared, 8)
                 self.assertEqual([item[0] for item in sink.predictions], list(range(count)))
                 self.assertLessEqual(pipeline.maximum_pending_colors, 8)
                 self.assertEqual(backend.tracker["peak"], 1)

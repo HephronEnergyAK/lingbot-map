@@ -25,6 +25,7 @@ from .result_resources import (
     require_project_disk,
     require_worker_memory,
 )
+from .sky_masking import SkyMaskSession
 
 
 CancelCheck = Callable[[], bool]
@@ -211,8 +212,19 @@ def _normalization(predictions: Sequence[AlignedPrediction]) -> tuple[np.ndarray
 def _filter_frame(
     frame: AlignedPrediction,
     profile: ResultProfile,
+    eligible_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, FrameFilterStatistics]:
     valid = np.isfinite(frame.depth) & (frame.depth > 0) & np.isfinite(frame.confidence)
+    if eligible_mask is not None:
+        if (
+            not isinstance(eligible_mask, np.ndarray)
+            or eligible_mask.dtype.str != "|u1"
+            or eligible_mask.shape != frame.depth.shape
+            or not eligible_mask.flags.c_contiguous
+            or not bool(np.isin(eligible_mask, (0, 1)).all())
+        ):
+            raise ResultPipelineError("Sky Mask eligibility grid is invalid")
+        valid &= eligible_mask.astype(bool, copy=False)
     valid_count = int(np.count_nonzero(valid))
     if not valid_count:
         return valid, FrameFilterStatistics(frame.frame_index, 0, 0, 0, None, None)
@@ -403,6 +415,7 @@ class IncrementalBundleResultSink:
         resource_probe: ResourceProbe,
         cancel: CancelCheck,
         provenance_factory: ProvenanceFactory | None = None,
+        sky_mask_session: SkyMaskSession | None = None,
     ) -> None:
         _validate_profile(request.profile)
         if request.frame_count < 1:
@@ -418,8 +431,11 @@ class IncrementalBundleResultSink:
         self.resource_probe = resource_probe
         self.cancel = cancel
         self.provenance_factory = provenance_factory
+        self.sky_mask_session = sky_mask_session
         self.estimated_result = estimate_core_result_bytes(
-            request.frame_count, request.profile.import_point_budget
+            request.frame_count,
+            request.profile.import_point_budget,
+            sky=sky_mask_session is not None,
         )
         self.dense_writer: DensePredictionWriter | None = None
         if request.profile.retain_dense_predictions:
@@ -468,6 +484,12 @@ class IncrementalBundleResultSink:
         self.model_shape: tuple[int, int] | None = None
         self._finished = False
         require_project_disk(resource_probe, request.project_root, self.estimated_result)
+
+    def prepare_frame(self, frame_index: int, canonical: Any) -> None:
+        if self._finished:
+            raise ResultPipelineError("incremental Result sink is already finished")
+        if self.sky_mask_session is not None:
+            self.sky_mask_session.prepare(frame_index, canonical)
 
     @property
     def estimated_remaining_bytes(self) -> int:
@@ -518,7 +540,14 @@ class IncrementalBundleResultSink:
         if self.normalization is None:
             first_blender = opencv_c2w @ _BLENDER_FROM_OPENCV_CAMERA
             self.normalization = _FIRST_CAMERA_TARGET @ np.linalg.inv(first_blender)
-        retained, statistics = _filter_frame(aligned, self.request.profile)
+        eligible_mask = None
+        if self.sky_mask_session is not None:
+            eligible_mask, _sky_fraction = self.sky_mask_session.mask_for(
+                expected, (height, width)
+            )
+        retained, statistics = _filter_frame(
+            aligned, self.request.profile, eligible_mask
+        )
         if self.dense_writer is not None:
             self.dense_writer.accept(expected, aligned.depth, aligned.confidence)
         self.filters.append(statistics)
@@ -586,6 +615,11 @@ class IncrementalBundleResultSink:
                 f"{self.request.frame_count} frames"
             )
         reduced = self.reducer.finish()
+        sky_outcome = (
+            self.sky_mask_session.finish()
+            if self.sky_mask_session is not None
+            else None
+        )
         arrays = {
             "positions": reduced.positions,
             "colors": reduced.colors,
@@ -600,6 +634,8 @@ class IncrementalBundleResultSink:
             "source_to_model": np.ascontiguousarray(self.request.source_to_model, dtype="<f8"),
             "frame_type": np.ascontiguousarray(self.frame_types, dtype="|u1"),
         }
+        if sky_outcome is not None:
+            arrays["sky_fraction"] = sky_outcome.sky_fraction
         profile = {
             "name": self.request.profile.name,
             "confidence_cutoff_percent": float(
@@ -614,6 +650,18 @@ class IncrementalBundleResultSink:
             if self.provenance_factory is not None
             else self.request.provenance
         )
+        if sky_outcome is not None:
+            provenance = dict(provenance)
+            models = list(provenance["models"])
+            models.append(
+                {
+                    "id": sky_outcome.provenance["model_id"],
+                    "role": "auxiliary",
+                    "sha256": sky_outcome.provenance["model_sha256"],
+                }
+            )
+            provenance["models"] = models
+            provenance["sky_masking"] = dict(sky_outcome.provenance)
         dense_component = (
             self.dense_writer.finish(provenance)
             if self.dense_writer is not None
@@ -627,7 +675,11 @@ class IncrementalBundleResultSink:
             source=self.request.source,
             profile=profile,
             provenance=provenance,
-            warnings=(*self.request.warnings, *self.window_warnings),
+            warnings=(
+                *self.request.warnings,
+                *self.window_warnings,
+                *(sky_outcome.warnings if sky_outcome is not None else ()),
+            ),
             arrays=arrays,
             voxel_edge_length=reduced.edge_length,
             voxel_origin=(0.0, 0.0, 0.0),
@@ -676,6 +728,8 @@ class IncrementalBundleResultSink:
         )
 
     def abort(self, reason: str) -> Path | None:
+        if self.sky_mask_session is not None:
+            self.sky_mask_session.abort()
         if self.dense_writer is None:
             return None
         return self.dense_writer.abort(reason)

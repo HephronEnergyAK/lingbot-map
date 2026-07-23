@@ -412,6 +412,13 @@ class ProjectBindingTests(unittest.TestCase):
                         "path": str(root / "model.pt"), "sha256": "f" * 64,
                     },
                     preflight_result=preflight,
+                    sky_mask_enabled=True,
+                    auxiliary_model={
+                        "catalog_version": "1.0.0",
+                        "id": "skyseg",
+                        "path": str(root / "skyseg.onnx"),
+                        "sha256": "9" * 64,
+                    },
                 )
             spec = read_json(project_result_root(blend) / ".jobs" / job_id / "job-spec.json")
             reconstruction = spec["reconstruction"]
@@ -419,6 +426,10 @@ class ProjectBindingTests(unittest.TestCase):
             self.assertEqual(reconstruction["profile"]["name"], "Custom")
             self.assertTrue(reconstruction["profile"]["point_budget_confirmed"])
             self.assertTrue(reconstruction["profile"]["retain_dense_predictions"])
+            self.assertTrue(reconstruction["sky_mask"]["enabled"])
+            self.assertEqual(
+                reconstruction["sky_mask"]["model"]["id"], "skyseg"
+            )
             self.assertEqual(reconstruction["source"]["sha256"], source_hash)
             self.assertEqual(captured["command"][4], "--reconstruction-job")
             self.assertEqual(captured["env"]["CUDA_VISIBLE_DEVICES"], "GPU-12345678")

@@ -22,6 +22,7 @@ CORE_ARRAYS = {
     "camera_to_world", "model_intrinsics", "source_intrinsics",
     "model_fov_radians", "source_pts_seconds", "source_to_model", "frame_type",
 }
+OPTIONAL_ARRAYS = {"sky_fraction"}
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,9 @@ class ReadyResult:
     alignment_boundary_count: int = 0
     quality_warning_count: int = 0
     worst_boundary: str | None = None
+    sky_masked: bool = False
+    sky_count_above_95_percent: int = 0
+    sky_cache_status: str | None = None
 
 
 def _ordinary_relative_file(root: Path, value: Any) -> Path:
@@ -186,7 +190,10 @@ def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> Read
     if (
         not isinstance(manifest, dict)
         or not required_fields.issubset(manifest)
-        or not set(manifest).issubset(required_fields | {"dense_predictions", "window_alignment"})
+        or not set(manifest).issubset(
+            required_fields
+            | {"dense_predictions", "window_alignment", "sky_statistics"}
+        )
     ):
         raise IpcError("Result manifest has unknown or missing fields")
     if manifest["schema_version"] != RESULT_SCHEMA_VERSION:
@@ -206,7 +213,11 @@ def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> Read
     if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in counts.values()):
         raise IpcError("Result counts are invalid")
     arrays = manifest["arrays"]
-    if not isinstance(arrays, dict) or set(arrays) != CORE_ARRAYS:
+    if (
+        not isinstance(arrays, dict)
+        or not CORE_ARRAYS.issubset(arrays)
+        or not set(arrays).issubset(CORE_ARRAYS | OPTIONAL_ARRAYS)
+    ):
         raise IpcError("Result array set is incomplete or unknown")
     for name, value in arrays.items():
         descriptor = require_exact_object(
@@ -215,6 +226,61 @@ def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> Read
         if descriptor["path"] != f"arrays/{name}.npy":
             raise IpcError("Result array path is not canonical")
         _ordinary_relative_file(directory, descriptor["path"])
+    sky_masked = "sky_fraction" in arrays
+    sky_count = 0
+    sky_cache_status = None
+    if sky_masked:
+        sky_descriptor = arrays["sky_fraction"]
+        if (
+            sky_descriptor["dtype"] != "<f4"
+            or sky_descriptor["shape"] != [counts["frames"]]
+        ):
+            raise IpcError("Sky fraction descriptor is invalid")
+        sky_statistics = require_exact_object(
+            manifest.get("sky_statistics"),
+            {"minimum", "median", "p95", "maximum", "count_above_95_percent"},
+            label="sky_statistics",
+        )
+        for name in ("minimum", "median", "p95", "maximum"):
+            value = sky_statistics[name]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0 <= float(value) <= 1
+            ):
+                raise IpcError("Sky fraction statistics are invalid")
+        sky_count = sky_statistics["count_above_95_percent"]
+        if (
+            isinstance(sky_count, bool)
+            or not isinstance(sky_count, int)
+            or not 0 <= sky_count <= counts["frames"]
+        ):
+            raise IpcError("Sky fraction warning count is invalid")
+        provenance = manifest.get("provenance")
+        if not isinstance(provenance, dict):
+            raise IpcError("Result provenance is invalid")
+        sky_provenance = require_exact_object(
+            provenance.get("sky_masking"),
+            {
+                "enabled", "model_id", "model_sha256", "rule_version",
+                "preprocessing_version", "provider", "onnxruntime_version",
+                "batch_size", "onnx_threads", "cache_key", "cache_status",
+            },
+            label="sky_masking provenance",
+        )
+        if (
+            sky_provenance["enabled"] is not True
+            or sky_provenance["provider"] != "CPUExecutionProvider"
+            or sky_provenance["batch_size"] != 1
+        ):
+            raise IpcError("Sky Mask provenance is invalid")
+        sky_cache_status = require_text(
+            sky_provenance["cache_status"],
+            label="sky_masking.cache_status",
+            maximum=64,
+        )
+    elif manifest.get("sky_statistics") is not None:
+        raise IpcError("Sky statistics require a sky_fraction array")
     profile = manifest["profile"]
     profile_fields = {
         "name", "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget"
@@ -245,6 +311,9 @@ def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> Read
         boundary_count,
         quality_warning_count,
         worst_boundary,
+        sky_masked,
+        sky_count,
+        sky_cache_status,
     )
 
 

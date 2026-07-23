@@ -40,6 +40,9 @@ class FakeLayout:
         self.events.append(("operator", operator_id, text))
         return SimpleNamespace()
 
+    def prop(self, owner, property_name, **_kwargs):
+        self.events.append(("prop", property_name, getattr(owner, property_name, None)))
+
     def separator(self):
         self.events.append(("separator",))
 
@@ -58,6 +61,7 @@ def install_fake_bpy(version=(5, 2, 1)):
         AddonPreferences=type("AddonPreferences", (), {}),
         Operator=type("Operator", (), {}),
         Panel=type("Panel", (), {}),
+        Scene=type("Scene", (), {}),
     )
     bpy.utils = registration
 
@@ -320,6 +324,40 @@ class RegistrationTests(unittest.TestCase):
         self.assertTrue(any("ab9c34c64c3d8212" in label for label in labels))
         self.assertEqual(operators.count("lingbot_map.download_model"), 2)
         self.assertEqual(operators.count("lingbot_map.import_model"), 2)
+
+    def test_reconstruct_panel_exposes_sky_mask_without_dynamic_content_claim(self):
+        with mock.patch.object(
+            self.extension, "probe_supported_host", return_value=self.supported_decision()
+        ):
+            self.extension.register()
+        self.assertTrue(
+            hasattr(self.bpy.types.Scene, "lingbot_map_sky_mask")
+        )
+        panel_class = next(
+            item
+            for item in self.extension.CLASSES
+            if item.__name__ == "LINGBOTMAP_PT_reconstruct"
+        )
+        panel = panel_class()
+        panel.layout = FakeLayout()
+        scene = SimpleNamespace(
+            lingbot_map_capture_source="//capture.mp4",
+            lingbot_map_profile="Draft",
+            lingbot_map_camera_iterations=1,
+            lingbot_map_confidence_cutoff_percent=70.0,
+            lingbot_map_depth_cutoff_percent=99.5,
+            lingbot_map_import_point_budget=1_000_000,
+            lingbot_map_retain_dense_predictions=False,
+            lingbot_map_sky_mask=True,
+        )
+        panel.draw(SimpleNamespace(scene=scene))
+        props = [event[1] for event in panel.layout.events if event[0] == "prop"]
+        labels = [event[1] for event in panel.layout.events if event[0] == "label"]
+        self.assertIn("lingbot_map_sky_mask", props)
+        self.assertTrue(
+            any("does not detect or remove Dynamic Content" in label for label in labels)
+        )
+        self.assertTrue(any("Moving people and vehicles" in label for label in labels))
 
     def test_gpu_test_persists_only_unambiguous_physical_uuid_before_nonmodal_start(self):
         with mock.patch.object(

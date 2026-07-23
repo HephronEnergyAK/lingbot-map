@@ -8,6 +8,7 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -45,6 +46,7 @@ if np is not None:
         IncrementalResultRequest,
         ResultBuildRequest,
         ResultProfile,
+        _filter_frame,
         build_reconstruction_result,
     )
     from lingbot_map_worker.result_resources import (
@@ -57,6 +59,7 @@ if np is not None:
         with_headroom,
     )
     from lingbot_map_worker.provenance import result_provenance
+    from lingbot_map_worker.sky_masking import SkyMaskError, SkyMaskOutcome
 
 
 SHA = "a" * 64
@@ -174,6 +177,22 @@ class FilteringAndCoordinateTests(unittest.TestCase):
             result = outcome.published.directory
             np.testing.assert_array_equal(np.load(result / "arrays/source_frame.npy"), (0,))
             self.assertTrue(np.isfinite(np.load(result / "arrays/positions.npy")).all())
+
+    def test_sky_eligibility_precedes_confidence_and_depth_percentiles(self):
+        frame = _prediction(
+            0,
+            depth=np.array(((1.0, 2.0), (3.0, 4.0)), dtype="<f4"),
+            confidence=np.array(((1.0, 2.0), (100.0, 200.0)), dtype="<f4"),
+        )
+        eligible = np.array(((1, 1), (0, 0)), dtype="|u1")
+        retained, statistics = _filter_frame(
+            frame,
+            ResultProfile("Custom", 50, 100, 8, 0.01),
+            eligible,
+        )
+        np.testing.assert_array_equal(retained, ((False, True), (False, False)))
+        self.assertEqual(statistics.valid_depth_count, 2)
+        self.assertEqual(statistics.confidence_threshold, 1.5)
 
     def test_reconstruction_frame_intrinsics_and_timestamps_are_exact(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -359,6 +378,173 @@ class SafeBundleTests(unittest.TestCase):
             self.assertEqual(result_renames[0][0].parent, result_renames[0][1].parent)
             self.assertTrue(outcome.published.directory.is_dir())
             self.assertEqual(list((fixture.project / "diagnostics").iterdir()), [])
+
+
+class FakeSkyMaskSession:
+    def __init__(self, masks, *, fail_frame=None):
+        self.masks = tuple(masks)
+        self.fail_frame = fail_frame
+        self.prepared = []
+        self.consumed = []
+        self.aborted = False
+
+    def prepare(self, frame_index, canonical):
+        self.prepared.append((frame_index, canonical))
+
+    def mask_for(self, frame_index, target_shape):
+        if frame_index == self.fail_frame:
+            raise SkyMaskError(f"missing Sky Mask frame {frame_index}")
+        mask = self.masks[frame_index]
+        if mask.shape != target_shape:
+            raise SkyMaskError("shape mismatch")
+        self.consumed.append(frame_index)
+        fraction = np.float32(1.0 - np.count_nonzero(mask) / mask.size)
+        return mask, fraction
+
+    def finish(self):
+        if len(self.consumed) != len(self.masks):
+            raise SkyMaskError("incomplete Sky Mask set")
+        fractions = np.ascontiguousarray(
+            [1.0 - np.count_nonzero(mask) / mask.size for mask in self.masks],
+            dtype="<f4",
+        )
+        return SkyMaskOutcome(
+            fractions,
+            {
+                "enabled": True,
+                "model_id": "skyseg",
+                "model_sha256": "9" * 64,
+                "rule_version": "non-sky-confidence-gt-0.1-v1",
+                "preprocessing_version": "skyseg-imagenet-320-bilinear-v1",
+                "provider": "CPUExecutionProvider",
+                "onnxruntime_version": "1.23.2",
+                "batch_size": 1,
+                "onnx_threads": 1,
+                "cache_key": "8" * 64,
+                "cache_status": "generated",
+            },
+            (),
+        )
+
+    def abort(self):
+        self.aborted = True
+
+
+@unittest.skipIf(np is None, "Worker NumPy stack is not installed")
+class SkyMaskResultTests(unittest.TestCase):
+    def _sink(self, root: Path, sky_session):
+        project = root / "target.lingbot-map"
+        (project / "results").mkdir(parents=True)
+        (project / "diagnostics").mkdir()
+        blend = root / "target.blend"
+        blend.touch()
+        source = root / "capture.mp4"
+        source.write_bytes(b"sky-result-fixture")
+        source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+        provenance = result_provenance(
+            runtime_id="2" * 64,
+            worker_version="0.1.0",
+            job_spec_sha256="3" * 64,
+            model_id="fixture-model",
+            model_sha256="4" * 64,
+            source_sha256=source_sha,
+            profile_name="Custom",
+            camera_iterations=1,
+            confidence_cutoff_percent=50,
+            depth_cutoff_percent=100,
+            import_point_budget=8,
+            plan=None,
+            gpu=None,
+            suspension_count=0,
+            suspension_seconds=0,
+            fixture=True,
+        )
+        request = IncrementalResultRequest(
+            job_id="job-" + "7" * 32,
+            project_root=project,
+            target_scene={
+                "blend_path": str(blend),
+                "scene_uuid": "12345678-1234-1234-1234-123456789abc",
+                "scene_name": "Scene",
+            },
+            timeline_start=1,
+            source={
+                "absolute_path": str(source),
+                "scene_relative_path": "//capture.mp4",
+                "size_bytes": source.stat().st_size,
+                "modification_time_ns": source.stat().st_mtime_ns,
+                "sha256": source_sha,
+            },
+            source_to_model=np.eye(3, dtype="<f8"),
+            frame_count=2,
+            profile=ResultProfile("Custom", 50, 100, 8, 0.01),
+            provenance=provenance,
+            created_utc="2026-07-23T07:00:00+00:00",
+            result_id="result-" + "8" * 32,
+            model_grid_shape=(2, 2),
+        )
+        return (
+            IncrementalBundleResultSink(
+                request,
+                prediction_decoder=lambda prediction, _canonical, _pts: prediction,
+                resource_probe=FixedResourceProbe(20 * 1024**3, 20 * 1024**3),
+                cancel=lambda: False,
+                sky_mask_session=sky_session,
+            ),
+            project,
+        )
+
+    def test_result_contains_only_sky_fractions_summary_and_provenance(self):
+        masks = (
+            np.array(((1, 1), (0, 0)), dtype="|u1"),
+            np.array(((0, 0), (0, 0)), dtype="|u1"),
+        )
+        sky = FakeSkyMaskSession(masks)
+        with tempfile.TemporaryDirectory() as temporary:
+            sink, _project = self._sink(Path(temporary), sky)
+            for index in range(2):
+                canonical = SimpleNamespace(color_rgb=np.zeros((2, 2, 3), dtype="|u1"))
+                sink.prepare_frame(index, canonical)
+                sink.accept(_prediction(index), canonical, index * 0.04)
+            outcome = sink.finish()
+            result = outcome.published.directory
+            manifest = validate_result_bundle(result)
+            self.assertEqual(sky.prepared[0][0], 0)
+            self.assertEqual(sky.consumed, [0, 1])
+            np.testing.assert_allclose(
+                np.load(result / "arrays" / "sky_fraction.npy"), (0.5, 1.0)
+            )
+            self.assertEqual(
+                manifest["sky_statistics"]["count_above_95_percent"], 1
+            )
+            self.assertEqual(
+                manifest["provenance"]["sky_masking"]["cache_key"], "8" * 64
+            )
+            self.assertEqual(
+                {item["role"] for item in manifest["provenance"]["models"]},
+                {"fixture", "auxiliary"},
+            )
+            self.assertFalse(any("mask" in path.name for path in result.rglob("*.npy") if path.name != "sky_fraction.npy"))
+
+    def test_missing_frame_fails_before_result_publication(self):
+        sky = FakeSkyMaskSession(
+            (
+                np.ones((2, 2), dtype="|u1"),
+                np.ones((2, 2), dtype="|u1"),
+            ),
+            fail_frame=1,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            sink, project = self._sink(Path(temporary), sky)
+            canonical = SimpleNamespace(color_rgb=np.zeros((2, 2, 3), dtype="|u1"))
+            sink.prepare_frame(0, canonical)
+            sink.accept(_prediction(0), canonical, 0.0)
+            sink.prepare_frame(1, canonical)
+            with self.assertRaisesRegex(SkyMaskError, "missing Sky Mask"):
+                sink.accept(_prediction(1), canonical, 0.04)
+            sink.abort("failed")
+            self.assertTrue(sky.aborted)
+            self.assertFalse(any((project / "results").iterdir()))
 
 
 @unittest.skipIf(np is None, "Worker NumPy stack is not installed")

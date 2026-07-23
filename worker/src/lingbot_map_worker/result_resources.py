@@ -158,3 +158,22 @@ def estimate_window_alignment_memory_bytes(grid_pixels: int) -> int:
         + alignment_scratch
         + camera_and_metadata
     )
+
+
+def estimate_sky_mask_buffer_bytes(frame_count: int, grid_pixels: int) -> int:
+    """One bounded 64-frame mask queue/chunk plus fixed SkySeg CPU tensors."""
+
+    if frame_count < 1 or grid_pixels < 1:
+        raise ResourceGateError("Sky Mask buffer dimensions must be positive")
+    queued_masks = min(frame_count, 64) * grid_pixels
+    chunk_copy = min(frame_count, 64) * grid_pixels
+    canonical_references = min(frame_count, 64) * 256
+    onnx_input_output = (3 * 320 * 320 + 320 * 320) * 4 * 2
+    sky_fractions = frame_count * 4
+    return (
+        queued_masks
+        + chunk_copy
+        + canonical_references
+        + onnx_input_output
+        + sky_fractions
+    )

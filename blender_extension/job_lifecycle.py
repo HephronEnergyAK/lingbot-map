@@ -37,6 +37,7 @@ DEPTH_CUTOFF_PROPERTY = "lingbot_map_depth_cutoff_percent"
 POINT_BUDGET_PROPERTY = "lingbot_map_import_point_budget"
 POINT_BUDGET_CONFIRMED_PROPERTY = "lingbot_map_point_budget_confirmed"
 RETAIN_DENSE_PROPERTY = "lingbot_map_retain_dense_predictions"
+SKY_MASK_PROPERTY = "lingbot_map_sky_mask"
 JOB_ID = re.compile(r"job-[0-9a-f]{32}\Z")
 TERMINAL_STATES = {"succeeded", "cancelled", "failed"}
 MAX_ACTIVE_ENTRIES = 32
@@ -683,6 +684,8 @@ class JobController:
         capability_profile_settings_sha256: str,
         model: Mapping[str, Any],
         preflight_result: Mapping[str, Any],
+        sky_mask_enabled: bool = False,
+        auxiliary_model: Mapping[str, Any] | None = None,
         initial_voxel_edge_length: float = 0.01,
     ) -> str:
         if self.has_active_job():
@@ -707,6 +710,27 @@ class JobController:
             or frozen["modification_time_ns"] != stat.st_mtime_ns
         ):
             raise JobLifecycleError("Successful preflight does not identify the current Capture Source")
+        if not isinstance(sky_mask_enabled, bool):
+            raise JobLifecycleError("Sky Mask choice must be boolean")
+        if sky_mask_enabled:
+            if not isinstance(auxiliary_model, Mapping):
+                raise JobLifecycleError(
+                    "Enabled Sky Masking requires a verified Auxiliary Model"
+                )
+            auxiliary_document = dict(auxiliary_model)
+            if (
+                set(auxiliary_document)
+                != {"catalog_version", "id", "path", "sha256"}
+                or auxiliary_document["id"] != "skyseg"
+            ):
+                raise JobLifecycleError("Sky Mask Auxiliary Model identity is invalid")
+            sky_mask = {"enabled": True, "model": auxiliary_document}
+        else:
+            if auxiliary_model is not None:
+                raise JobLifecycleError(
+                    "Disabled Sky Masking cannot name an Auxiliary Model"
+                )
+            sky_mask = {"enabled": False}
         job_id = f"job-{uuid.uuid4().hex}"
         job_dir = root / ".jobs" / job_id
         job_dir.mkdir()
@@ -760,6 +784,7 @@ class JobController:
                     "capability_profile_settings_sha256": capability_profile_settings_sha256,
                 },
                 "model": dict(model),
+                "sky_mask": sky_mask,
                 "heartbeat_interval_seconds": 1.0,
                 "initial_voxel_edge_length": float(initial_voxel_edge_length),
             },

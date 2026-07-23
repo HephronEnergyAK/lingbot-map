@@ -12,6 +12,7 @@ dependencies = [
     "av==17.1.0",
     "lingbot-map==0.1.0",
     "nvidia-ml-py==13.610.43",
+    "onnxruntime==1.23.2",
     "torch==2.11.0",
 ]
 

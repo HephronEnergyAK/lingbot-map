@@ -88,6 +88,19 @@
           "uuid": {"type": "string", "pattern": "^(GPU|MIG)-[A-Za-z0-9-]{8,90}$"}, "name": {"type": "string", "minLength": 1}, "total_memory": {"type": "integer", "minimum": 1}, "driver_version": {"type": "string", "minLength": 1}, "compute_capability": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 0}, {"type": "integer", "minimum": 0}], "items": false}, "capability_profile_name": {"enum": ["Draft", "Balanced", "High"]}, "capability_profile_settings_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         }},
         "model": {"type": "object", "additionalProperties": false, "required": ["catalog_version", "id", "path", "sha256"], "properties": {"catalog_version": {"type": "string", "minLength": 1}, "id": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1, "maxLength": 32767}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+        "sky_mask": {
+          "oneOf": [
+            {"type": "object", "additionalProperties": false, "required": ["enabled"], "properties": {"enabled": {"const": false}}},
+            {"type": "object", "additionalProperties": false, "required": ["enabled", "model"], "properties": {
+              "enabled": {"const": true},
+              "model": {"type": "object", "additionalProperties": false, "required": ["catalog_version", "id", "path", "sha256"], "properties": {
+                "catalog_version": {"type": "string", "minLength": 1}, "id": {"const": "skyseg"},
+                "path": {"type": "string", "minLength": 1, "maxLength": 32767},
+                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }}
+            }}
+          ]
+        },
         "heartbeat_interval_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 5},
         "initial_voxel_edge_length": {"type": "number", "exclusiveMinimum": 0}
       }

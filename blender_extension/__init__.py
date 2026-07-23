@@ -24,6 +24,7 @@ from .job_lifecycle import (
     POINT_BUDGET_PROPERTY,
     PROFILE_PROPERTY,
     RETAIN_DENSE_PROPERTY,
+    SKY_MASK_PROPERTY,
     detach_job_monitor,
     recover_jobs_for_blend,
     report_job_recovery_error,
@@ -130,6 +131,19 @@ def register() -> None:
             setattr(scene_type, POINT_BUDGET_PROPERTY, IntProperty(name="Import Point Budget", default=1_000_000, min=1, max=50_000_000, update=_mark_profile_custom))
             setattr(scene_type, POINT_BUDGET_CONFIRMED_PROPERTY, BoolProperty(name="Confirm Large Budget", default=False, update=_mark_profile_custom))
             setattr(scene_type, RETAIN_DENSE_PROPERTY, BoolProperty(name="Retain Dense Predictions", description="Retain finalized aligned depth and raw confidence in optional chunks", default=False, update=_mark_profile_custom))
+        if scene_type is not None and not hasattr(scene_type, SKY_MASK_PROPERTY):
+            setattr(
+                scene_type,
+                SKY_MASK_PROPERTY,
+                BoolProperty(
+                    name="Sky Masking",
+                    description=(
+                        "Filter sky point candidates on every frame without changing "
+                        "Reconstruction Model input; not Dynamic Content removal"
+                    ),
+                    default=False,
+                ),
+            )
         handlers = getattr(bpy.app, "handlers", None)
         timers = getattr(bpy.app, "timers", None)
         if handlers is not None and _recover_jobs_after_load not in handlers.load_post:
@@ -188,6 +202,7 @@ def _unregister_scene_property() -> None:
             POINT_BUDGET_PROPERTY,
             POINT_BUDGET_CONFIRMED_PROPERTY,
             RETAIN_DENSE_PROPERTY,
+            SKY_MASK_PROPERTY,
         ):
             if hasattr(scene_type, name):
                 delattr(scene_type, name)

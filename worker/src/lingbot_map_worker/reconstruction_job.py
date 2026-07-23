@@ -59,6 +59,7 @@ from .result_resources import (
     SystemResourceProbe,
     estimate_fixture_memory_bytes,
     estimate_dense_buffer_bytes,
+    estimate_sky_mask_buffer_bytes,
     estimate_window_alignment_memory_bytes,
     require_project_disk,
     require_worker_memory,
@@ -68,6 +69,11 @@ from .short_pipeline import (
     ProgressReporter,
     ShortReconstructionPipeline,
     SourceFrame,
+)
+from .sky_masking import (
+    SkyMaskCancelled,
+    SkyMaskRequest,
+    SkyMaskSession,
 )
 from .sleep_guard import WindowsExecutionState, WindowsSleepGuard
 from .torch_capability import (
@@ -99,6 +105,44 @@ def _require_plain_managed_path(path: Path, managed_root: Path) -> None:
         if current.parent == current or not current.is_relative_to(managed_root):
             raise ReconstructionJobError("Reconstruction Model escaped the managed root")
         current = current.parent
+
+
+def _validate_catalogued_auxiliary(
+    *,
+    managed_root: Path,
+    runtime_id: str,
+    model: dict[str, Any],
+) -> None:
+    catalog_path = managed_root / "runtimes" / runtime_id / "model-catalog.json"
+    _require_plain_managed_path(catalog_path, managed_root)
+    document = read_json(catalog_path)
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"catalog_version", "models"}
+        or document["catalog_version"] != model["catalog_version"]
+        or not isinstance(document["models"], list)
+    ):
+        raise ReconstructionJobError("Worker Model Catalog identity is invalid")
+    matches = [
+        entry
+        for entry in document["models"]
+        if isinstance(entry, dict) and entry.get("id") == model["id"]
+    ]
+    if len(matches) != 1:
+        raise ReconstructionJobError("Auxiliary Model is absent from the Worker Catalog")
+    entry = matches[0]
+    artifact = entry.get("artifact")
+    if (
+        entry.get("role") != "auxiliary"
+        or entry.get("architecture") != "Sky segmentation ONNX CPU native-v1"
+        or not isinstance(entry.get("input_contract"), dict)
+        or entry["input_contract"].get("provider") != "CPUExecutionProvider"
+        or entry["input_contract"].get("mask_rule")
+        != "non-sky-confidence-gt-0.1-v1"
+        or not isinstance(artifact, dict)
+        or artifact.get("sha256") != model["sha256"]
+    ):
+        raise ReconstructionJobError("Auxiliary Model disagrees with the Worker Catalog")
 
 
 def _selected_profile(raw: dict[str, Any]) -> tuple[Any, ReconstructionProfile]:
@@ -152,6 +196,9 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
     preflight = reconstruction["preflight"]
     gpu_raw = reconstruction["gpu"]
     model = reconstruction["model"]
+    sky_mask = reconstruction.get("sky_mask", {"enabled": False})
+    sky_mask_enabled = bool(sky_mask["enabled"])
+    auxiliary_model = sky_mask.get("model") if sky_mask_enabled else None
     managed_root = Path(os.path.abspath(reconstruction["managed_root"]))
     model_path = Path(os.path.abspath(model["path"]))
     if (
@@ -159,6 +206,14 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
     ):
         raise ReconstructionJobError("Reconstruction Model escaped the plain managed store")
     _require_plain_managed_path(model_path, managed_root)
+    auxiliary_model_path: Path | None = None
+    if auxiliary_model is not None:
+        auxiliary_model_path = Path(os.path.abspath(auxiliary_model["path"]))
+        if not auxiliary_model_path.is_relative_to(managed_root):
+            raise ReconstructionJobError(
+                "Sky Mask Auxiliary Model escaped the plain managed store"
+            )
+        _require_plain_managed_path(auxiliary_model_path, managed_root)
     resolved_profile, execution_profile = _selected_profile(reconstruction["profile"])
     retain_dense = bool(reconstruction["profile"].get("retain_dense_predictions", False))
     plan = inference_plan(int(preflight["frame_count"]))
@@ -192,7 +247,11 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
         heartbeat.start()
         budget = _thread_budget()
         decoder_threads = 1
-        torch_threads = max(1, budget - decoder_threads)
+        onnx_threads = 1
+        torch_threads = max(
+            1,
+            budget - decoder_threads - (onnx_threads if sky_mask_enabled else 0),
+        )
         source = Path(source_raw["absolute_path"])
         contract = DecodeContract(
             SourceIdentity(
@@ -220,6 +279,10 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
             estimated_memory += estimate_dense_buffer_bytes(total_frames, grid_pixels)
         if plan.mode == "windowed":
             estimated_memory += estimate_window_alignment_memory_bytes(grid_pixels)
+        if sky_mask_enabled:
+            estimated_memory += estimate_sky_mask_buffer_bytes(
+                total_frames, grid_pixels
+            )
         require_worker_memory(probe, estimated_memory)
         source_document = {
             "absolute_path": source_raw["absolute_path"],
@@ -270,6 +333,33 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
             CapabilityCache(managed_root / "capability-cache"),
             devices,
         )
+        sky_session: SkyMaskSession | None = None
+        if sky_mask_enabled:
+            assert auxiliary_model is not None
+            assert auxiliary_model_path is not None
+            _validate_catalogued_auxiliary(
+                managed_root=managed_root,
+                runtime_id=control["runtime_id"],
+                model=auxiliary_model,
+            )
+            sky_session = SkyMaskSession(
+                SkyMaskRequest(
+                    managed_root=managed_root,
+                    source_sha256=source_raw["sha256"],
+                    video_stream_index=int(preflight["video_stream_index"]),
+                    display_transform=preflight["display_transform"],
+                    color_standard=preflight["color_standard"],
+                    color_range=preflight["color_range"],
+                    frame_count=total_frames,
+                    model_grid_shape=(canonical_height, canonical_width),
+                    model_id=auxiliary_model["id"],
+                    model_path=auxiliary_model_path,
+                    model_sha256=auxiliary_model["sha256"],
+                    worker_version=__version__,
+                    onnx_threads=onnx_threads,
+                    cancel=lambda: _cancelled(job_dir),
+                )
+            )
 
         def resource_check() -> None:
             require_worker_memory(probe, estimated_memory)
@@ -343,6 +433,7 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
                 suspension_count=guard.suspension_count,
                 suspension_seconds=guard.suspension_seconds,
                 decoder_threads=decoder_threads,
+                onnx_threads=onnx_threads,
                 torch_intraop_threads=torch_threads,
                 torch_interop_threads=1,
             )
@@ -377,6 +468,7 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
             resource_probe=probe,
             cancel=lambda: _cancelled(job_dir),
             provenance_factory=provenance,
+            sky_mask_session=sky_session,
         )
 
         def adapter_factory(current_plan, _profile, frame_shape):
@@ -450,7 +542,7 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
             f"Ready Result {outcome.published.result_id} published",
             0,
         )
-    except (PipelineCancelled, ResultCancelled):
+    except (PipelineCancelled, ResultCancelled, SkyMaskCancelled):
         state, message, return_code = "cancelled", "Reconstruction Job cancelled", 2
     except Exception as exc:
         try:
@@ -468,6 +560,14 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
                 if error is None:
                     error = (
                         f"{type(dense_abort_error).__name__}: {dense_abort_error}"
+                    )[:16384]
+        elif "sky_session" in locals() and sky_session is not None:
+            try:
+                sky_session.abort()
+            except Exception as sky_abort_error:
+                if error is None:
+                    error = (
+                        f"{type(sky_abort_error).__name__}: {sky_abort_error}"
                     )[:16384]
         stop.set()
         if heartbeat.is_alive():

@@ -37,6 +37,7 @@ from .job_lifecycle import (
     POINT_BUDGET_PROPERTY,
     PROFILE_PROPERTY,
     RETAIN_DENSE_PROPERTY,
+    SKY_MASK_PROPERTY,
     cancel_active_job,
     capture_source_draft_path,
     ensure_unique_scene_uuid,
@@ -416,7 +417,26 @@ class LINGBOTMAP_OT_run_reconstruction_job(bpy.types.Operator):
             if len(entries) != 1:
                 raise JobLifecycleError("Model Catalog must contain one Reconstruction Model")
             entry = entries[0]
-            model_path = ModelStore(managed_root, catalog).validate(entry)
+            store = ModelStore(managed_root, catalog)
+            model_path = store.validate(entry)
+            sky_mask_enabled = bool(getattr(scene, SKY_MASK_PROPERTY))
+            auxiliary_model = None
+            if sky_mask_enabled:
+                auxiliary_entries = tuple(
+                    item for item in catalog.entries if item.role == "auxiliary"
+                )
+                if len(auxiliary_entries) != 1:
+                    raise JobLifecycleError(
+                        "Model Catalog must contain one Sky Mask Auxiliary Model"
+                    )
+                auxiliary_entry = auxiliary_entries[0]
+                auxiliary_path = store.validate(auxiliary_entry)
+                auxiliary_model = {
+                    "catalog_version": catalog.version,
+                    "id": auxiliary_entry.id,
+                    "path": str(auxiliary_path),
+                    "sha256": auxiliary_entry.artifact.sha256,
+                }
             profile_name = str(getattr(scene, PROFILE_PROPERTY))
             camera_iterations = int(getattr(scene, CAMERA_ITERATIONS_PROPERTY))
             if camera_iterations > 4:
@@ -441,6 +461,8 @@ class LINGBOTMAP_OT_run_reconstruction_job(bpy.types.Operator):
                 import_point_budget=int(getattr(scene, POINT_BUDGET_PROPERTY)),
                 point_budget_confirmed=bool(getattr(scene, POINT_BUDGET_CONFIRMED_PROPERTY)),
                 retain_dense_predictions=bool(getattr(scene, RETAIN_DENSE_PROPERTY)),
+                sky_mask_enabled=sky_mask_enabled,
+                auxiliary_model=auxiliary_model,
                 gpu=asdict(selected_gpu),
                 capability_profile_name=capability_name,
                 capability_profile_settings_sha256=_capability_settings_sha256(capability_name),
@@ -605,6 +627,9 @@ class LINGBOTMAP_PT_reconstruct(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         box.prop(context.scene, DEPTH_CUTOFF_PROPERTY, text="Depth Cutoff %")
         box.prop(context.scene, POINT_BUDGET_PROPERTY, text="Import Point Budget")
         box.prop(context.scene, RETAIN_DENSE_PROPERTY, text="Retain Dense Predictions")
+        box.prop(context.scene, SKY_MASK_PROPERTY, text="Sky Masking")
+        box.label(text="Sky only; does not detect or remove Dynamic Content")
+        box.label(text="Moving people and vehicles may still ghost or trail")
         if int(getattr(context.scene, POINT_BUDGET_PROPERTY)) > 10_000_000:
             box.prop(context.scene, POINT_BUDGET_CONFIRMED_PROPERTY, text="Confirm >10M Budget")
         run = layout.row()
@@ -668,6 +693,19 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                 box.label(text="Dense Predictions: incompatible version", icon="ERROR")
             elif result.dense_status == "unavailable":
                 box.label(text="Dense Predictions: unavailable; core Result remains usable", icon="ERROR")
+            if result.sky_masked:
+                box.label(
+                    text=f"Sky Masking: enabled ({result.sky_cache_status})",
+                    icon="CHECKMARK",
+                )
+                if result.sky_count_above_95_percent:
+                    box.label(
+                        text=(
+                            "Sky Mask warning: "
+                            f"{result.sky_count_above_95_percent} frames exceed 95% sky"
+                        ),
+                        icon="ERROR",
+                    )
 
 
 class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):

@@ -41,6 +41,10 @@ def main():
     preferences = preferences_class.bl_rna.properties
     for property_name in ("runtime_root", "gpu_uuid", "offline_setup"):
         assert property_name in preferences, property_name
+    sky_property = bpy.types.Scene.bl_rna.properties["lingbot_map_sky_mask"]
+    assert sky_property.type == "BOOLEAN", sky_property.type
+    assert sky_property.default is False, sky_property.default
+    assert "not Dynamic Content removal" in sky_property.description
     assert not any(
         name == "lingbot_map"
         or name.startswith("lingbot_map.")
@@ -73,6 +77,11 @@ def main():
                 "host_code": extension.get_host_decision().code,
                 "panels": list(PANEL_TYPES),
                 "preferences": ["runtime_root", "gpu_uuid", "offline_setup"],
+                "sky_mask_property": {
+                    "type": sky_property.type,
+                    "default": sky_property.default,
+                    "dynamic_content_claim": False,
+                },
                 "reload": "passed",
                 "disable_enable": "passed",
                 "worker_or_model_imported": False,

@@ -88,6 +88,10 @@ CORE_ARRAY_DTYPES = {
     "source_to_model": "<f8",
     "frame_type": "|u1",
 }
+OPTIONAL_ARRAY_DTYPES = {
+    "sky_fraction": "<f4",
+}
+RESULT_ARRAY_DTYPES = {**CORE_ARRAY_DTYPES, **OPTIONAL_ARRAY_DTYPES}
 
 
 def is_plain_path(path: Path) -> bool:
@@ -223,18 +227,21 @@ def _write_npy(path: Path, array: np.ndarray) -> None:
 
 
 def _validate_array_input(name: str, array: np.ndarray) -> None:
-    if name not in CORE_ARRAY_DTYPES:
+    if name not in RESULT_ARRAY_DTYPES:
         raise ResultBundleError(f"unknown core Result array: {name}")
     if not isinstance(array, np.ndarray):
         raise ResultBundleError(f"{name} must be an ndarray without implicit conversion")
-    if array.dtype.str != CORE_ARRAY_DTYPES[name] or not array.flags.c_contiguous:
+    if array.dtype.str != RESULT_ARRAY_DTYPES[name] or not array.flags.c_contiguous:
         raise ResultBundleError(f"{name} has an invalid dtype or memory order")
     if array.dtype.fields is not None or array.dtype.hasobject:
         raise ResultBundleError(f"{name} uses an object or structured dtype")
 
 
 def _validate_semantics(arrays: Mapping[str, np.ndarray]) -> tuple[int, int]:
-    if set(arrays) != set(CORE_ARRAY_DTYPES):
+    if (
+        not set(CORE_ARRAY_DTYPES).issubset(arrays)
+        or not set(arrays).issubset(RESULT_ARRAY_DTYPES)
+    ):
         raise ResultBundleError("core Result array set is incomplete or contains unknown names")
     for name, array in arrays.items():
         _validate_array_input(name, array)
@@ -262,6 +269,15 @@ def _validate_semantics(arrays: Mapping[str, np.ndarray]) -> tuple[int, int]:
     for name, shape in expected_frames.items():
         if arrays[name].shape != shape:
             raise ResultBundleError(f"{name} must have shape {shape}")
+    if "sky_fraction" in arrays:
+        sky_fraction = arrays["sky_fraction"]
+        if sky_fraction.shape != (frame_count,):
+            raise ResultBundleError("sky_fraction must have shape (F,)")
+        if (
+            not bool(np.isfinite(sky_fraction).all())
+            or not bool(((sky_fraction >= 0) & (sky_fraction <= 1)).all())
+        ):
+            raise ResultBundleError("sky_fraction must be finite and within [0,1]")
     for name in (
         "positions", "confidence", "radius", "camera_to_world", "model_intrinsics",
         "source_intrinsics", "model_fov_radians", "source_pts_seconds", "source_to_model",
@@ -367,7 +383,9 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
     if (
         not isinstance(manifest, dict)
         or not fields.issubset(manifest)
-        or not set(manifest).issubset(fields | {"dense_predictions", "window_alignment"})
+        or not set(manifest).issubset(
+            fields | {"dense_predictions", "window_alignment", "sky_statistics"}
+        )
     ):
         raise ResultBundleError("Result manifest has unknown or missing fields")
     if manifest["schema_version"] != RESULT_SCHEMA_VERSION:
@@ -473,7 +491,11 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
     if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in counts.values()):
         raise ResultBundleError("Result counts are invalid")
     descriptors = manifest["arrays"]
-    if not isinstance(descriptors, dict) or set(descriptors) != set(CORE_ARRAY_DTYPES):
+    if (
+        not isinstance(descriptors, dict)
+        or not set(CORE_ARRAY_DTYPES).issubset(descriptors)
+        or not set(descriptors).issubset(RESULT_ARRAY_DTYPES)
+    ):
         raise ResultBundleError("Result array descriptors are incomplete or unknown")
     arrays: dict[str, np.ndarray] = {}
     declared = {"manifest.json"}
@@ -501,7 +523,7 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
             raise ResultBundleError(f"array descriptor size or checksum is invalid: {name}")
         shape = tuple(raw_shape)
         contract = ArrayContract(str(descriptor["dtype"]), shape)
-        if contract.dtype != CORE_ARRAY_DTYPES[name]:
+        if contract.dtype != RESULT_ARRAY_DTYPES[name]:
             raise ResultBundleError(f"array descriptor dtype is invalid: {name}")
         array = validate_npy_file(path, contract)
         if path.stat().st_size != descriptor["byte_length"] or _sha256_file(path) != descriptor["sha256"]:
@@ -525,6 +547,33 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
             raise ResultBundleError("confidence statistics disagree with retained values")
     elif any(value is not None for value in statistics.values()):
         raise ResultBundleError("empty point cloud must use null confidence statistics")
+    sky_statistics = manifest.get("sky_statistics")
+    if "sky_fraction" in arrays:
+        sky_statistics = require_exact_object(
+            sky_statistics,
+            {"minimum", "median", "p95", "maximum", "count_above_95_percent"},
+            label="sky_statistics",
+        )
+        actual_sky = np.percentile(arrays["sky_fraction"], (0, 50, 95, 100))
+        recorded_sky = np.array(
+            [
+                sky_statistics["minimum"],
+                sky_statistics["median"],
+                sky_statistics["p95"],
+                sky_statistics["maximum"],
+            ],
+            dtype=np.float64,
+        )
+        if (
+            not np.allclose(actual_sky, recorded_sky, atol=1e-6, rtol=1e-6)
+            or isinstance(sky_statistics["count_above_95_percent"], bool)
+            or not isinstance(sky_statistics["count_above_95_percent"], int)
+            or sky_statistics["count_above_95_percent"]
+            != int(np.count_nonzero(arrays["sky_fraction"] > np.float32(0.95)))
+        ):
+            raise ResultBundleError("Sky Mask statistics disagree with sky_fraction")
+    elif sky_statistics is not None:
+        raise ResultBundleError("Sky Mask statistics require sky_fraction")
     warnings = manifest["warnings"]
     if not isinstance(warnings, list):
         raise ResultBundleError("warnings must be an array")
@@ -619,16 +668,19 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
         )
         if quality_warning_count != triggered_count:
             raise ResultBundleError("window alignment Quality Warnings disagree with boundaries")
-    provenance = require_exact_object(
-        manifest["provenance"],
-        {
+    provenance_fields = {
             "runtime_id", "worker_version", "job_spec_sha256", "model_sha256",
             "source_sha256", "preprocessing_rule_version", "filtering_rule_version",
             "point_reducer_rule_version", "resource_estimate_version", "models",
             "gpu", "profile", "preprocessing", "inference", "suspension", "system",
-        },
-        label="provenance",
-    )
+        }
+    provenance = manifest["provenance"]
+    if (
+        not isinstance(provenance, dict)
+        or not provenance_fields.issubset(provenance)
+        or not set(provenance).issubset(provenance_fields | {"sky_masking"})
+    ):
+        raise ResultBundleError("provenance has unknown or missing fields")
     for name in ("runtime_id", "job_spec_sha256", "model_sha256", "source_sha256"):
         if not SHA256.fullmatch(str(provenance[name])):
             raise ResultBundleError(f"provenance checksum or identity is invalid: {name}")
@@ -653,6 +705,55 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
             raise ResultBundleError("provenance model checksum is invalid")
     if not any(model["sha256"] == provenance["model_sha256"] for model in models):
         raise ResultBundleError("primary model checksum is absent from provenance models")
+    sky_masking = provenance.get("sky_masking")
+    if sky_masking is not None:
+        sky_masking = require_exact_object(
+            sky_masking,
+            {
+                "enabled", "model_id", "model_sha256", "rule_version",
+                "preprocessing_version", "provider", "onnxruntime_version",
+                "batch_size", "onnx_threads", "cache_key", "cache_status",
+            },
+            label="sky_masking provenance",
+        )
+        if (
+            sky_masking["enabled"] is not True
+            or sky_masking["model_id"] != "skyseg"
+            or not SHA256.fullmatch(str(sky_masking["model_sha256"]))
+            or sky_masking["rule_version"] != "non-sky-confidence-gt-0.1-v1"
+            or sky_masking["preprocessing_version"]
+            != "skyseg-imagenet-320-bilinear-v1"
+            or sky_masking["provider"] != "CPUExecutionProvider"
+            or sky_masking["batch_size"] != 1
+            or isinstance(sky_masking["onnx_threads"], bool)
+            or not isinstance(sky_masking["onnx_threads"], int)
+            or not 1 <= sky_masking["onnx_threads"] <= 8
+            or not SHA256.fullmatch(str(sky_masking["cache_key"]))
+            or sky_masking["cache_status"]
+            not in {
+                "hit", "generated", "regenerated", "race-reused",
+                "generated-cache-write-failed",
+                "regenerated-cache-write-failed",
+            }
+        ):
+            raise ResultBundleError("Sky Mask provenance is invalid")
+        require_text(
+            sky_masking["onnxruntime_version"],
+            label="sky_masking.onnxruntime_version",
+            maximum=128,
+        )
+        if not any(
+            model
+            == {
+                "id": sky_masking["model_id"],
+                "role": "auxiliary",
+                "sha256": sky_masking["model_sha256"],
+            }
+            for model in models
+        ):
+            raise ResultBundleError("Sky Mask Auxiliary Model is absent from provenance")
+    if ("sky_fraction" in arrays) != (sky_masking is not None):
+        raise ResultBundleError("Sky Mask provenance and sky_fraction disagree")
     gpu = provenance["gpu"]
     if gpu is not None:
         gpu = require_exact_object(
@@ -754,6 +855,11 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
         if isinstance(system[name], bool) or not isinstance(system[name], int) or system[name] < 1:
             raise ResultBundleError(f"system {name} is invalid")
     require_text(system["priority"], label="system.priority", maximum=64)
+    if (
+        sky_masking is not None
+        and system["onnx_threads"] != sky_masking["onnx_threads"]
+    ):
+        raise ResultBundleError("Sky Mask and system ONNX thread provenance disagree")
     logs = manifest["logs"]
     if not isinstance(logs, list):
         raise ResultBundleError("logs must be an array")
@@ -859,6 +965,19 @@ def publish_result_bundle(
             }
         else:
             statistics = {name: None for name in ("p0", "p5", "p25", "p50", "p75", "p95", "p100")}
+        sky_statistics = None
+        if "sky_fraction" in publication.arrays:
+            sky_fraction = publication.arrays["sky_fraction"]
+            sky_percentiles = np.percentile(sky_fraction, (0, 50, 95, 100))
+            sky_statistics = {
+                "minimum": float(sky_percentiles[0]),
+                "median": float(sky_percentiles[1]),
+                "p95": float(sky_percentiles[2]),
+                "maximum": float(sky_percentiles[3]),
+                "count_above_95_percent": int(
+                    np.count_nonzero(sky_fraction > np.float32(0.95))
+                ),
+            }
         manifest = {
             "schema_version": RESULT_SCHEMA_VERSION,
             "result_id": result_id,
@@ -890,6 +1009,8 @@ def publish_result_bundle(
             manifest["dense_predictions"] = dense_descriptor
         if publication.window_alignment is not None:
             manifest["window_alignment"] = dict(publication.window_alignment)
+        if sky_statistics is not None:
+            manifest["sky_statistics"] = sky_statistics
         if cancel():
             raise ResultCancelled("Result publication was cancelled before commit")
         disk_check(max(0, remaining))
