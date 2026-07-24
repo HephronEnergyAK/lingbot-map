@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
+import stat
 import struct
 from typing import Any, Callable, Mapping
 import uuid
@@ -106,6 +107,35 @@ OPTIONAL_ARRAY_DTYPES = {
     "sky_fraction": "<f4",
 }
 RESULT_ARRAY_DTYPES = {**CORE_ARRAY_DTYPES, **OPTIONAL_ARRAY_DTYPES}
+FileIdentity = tuple[int, int, int, int]
+
+
+def _file_identity(value: Any) -> FileIdentity:
+    return (
+        int(getattr(value, "st_dev", 0)),
+        int(getattr(value, "st_ino", 0)),
+        int(getattr(value, "st_size", 0)),
+        int(getattr(value, "st_mtime_ns", 0)),
+    )
+
+
+def _ordinary_file_stat(path: Path) -> os.stat_result:
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise ResultBundleError(
+            f"Result path cannot be inspected safely: {path.name}"
+        ) from exc
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or stat.S_ISLNK(value.st_mode)
+        or bool(
+            getattr(value, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+    ):
+        raise ResultBundleError(f"Result path is not an ordinary file: {path.name}")
+    return value
 
 
 def is_plain_path(path: Path) -> bool:
@@ -140,8 +170,7 @@ def safe_relative_file(root: Path, value: str) -> Path:
 
 
 def _npy_header(path: Path) -> tuple[str, bool, tuple[int, ...], int]:
-    if not path.is_file() or path.is_symlink() or is_reparse_point(path):
-        raise ResultBundleError(f"NPY path is not an ordinary file: {path.name}")
+    _ordinary_file_stat(path)
     with path.open("rb") as stream:
         if stream.read(6) != b"\x93NUMPY":
             raise ResultBundleError(f"NPY magic is invalid: {path.name}")
@@ -184,40 +213,70 @@ def _npy_header(path: Path) -> tuple[str, bool, tuple[int, ...], int]:
     return dtype, fortran, tuple(shape), payload_offset
 
 
-def validate_npy_file(path: Path, contract: ArrayContract) -> np.memmap:
+def validate_npy_file(
+    path: Path,
+    contract: ArrayContract,
+    *,
+    expected_identity: FileIdentity | None = None,
+) -> np.memmap:
+    before = _ordinary_file_stat(path)
+    if (
+        expected_identity is not None
+        and _file_identity(before) != expected_identity
+    ):
+        raise ResultBundleError(f"NPY file changed before consumption: {path.name}")
     dtype, fortran, shape, payload_offset = _npy_header(path)
     if dtype != contract.dtype or shape != contract.shape or fortran:
         raise ResultBundleError(
             f"NPY contract mismatch for {path.name}: {dtype} {shape} fortran={fortran}"
         )
     expected_payload = math.prod(shape) * np.dtype(contract.dtype).itemsize
-    if path.stat().st_size != payload_offset + expected_payload:
+    if before.st_size != payload_offset + expected_payload:
         raise ResultBundleError(f"NPY byte length is inconsistent: {path.name}")
+    immediately_before = _ordinary_file_stat(path)
+    trusted_identity = expected_identity or _file_identity(before)
+    if _file_identity(immediately_before) != trusted_identity:
+        raise ResultBundleError(f"NPY file changed before consumption: {path.name}")
     try:
         array = np.load(path, mmap_mode="r", allow_pickle=False)
     except (OSError, ValueError, MemoryError) as exc:
         raise ResultBundleError(f"NPY data cannot be opened safely: {path.name}") from exc
+    immediately_after = _ordinary_file_stat(path)
+    if _file_identity(immediately_after) != trusted_identity:
+        raise ResultBundleError(f"NPY file changed during consumption: {path.name}")
     if array.dtype.str != contract.dtype or tuple(array.shape) != shape or not array.flags.c_contiguous:
         raise ResultBundleError(f"NPY loaded representation is inconsistent: {path.name}")
     return array
 
 
-def _sha256_file(path: Path) -> str:
-    before = path.stat()
+def _sha256_file_identity(path: Path) -> tuple[str, int, FileIdentity]:
+    before = _ordinary_file_stat(path)
     digest = hashlib.sha256()
     completed = 0
     with path.open("rb") as stream:
+        handle_before = os.fstat(stream.fileno())
+        if _file_identity(handle_before) != _file_identity(before):
+            raise ResultBundleError(
+                f"Result file changed before hashing: {path.name}"
+            )
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
             completed += len(chunk)
-    after = path.stat()
+        handle_after = os.fstat(stream.fileno())
+    after = _ordinary_file_stat(path)
     if (
-        before.st_size != after.st_size
-        or before.st_mtime_ns != after.st_mtime_ns
+        _file_identity(before) != _file_identity(handle_before)
+        or _file_identity(handle_before) != _file_identity(handle_after)
+        or _file_identity(handle_after) != _file_identity(after)
         or completed != before.st_size
     ):
         raise ResultBundleError(f"Result file changed while hashing: {path.name}")
-    return digest.hexdigest()
+    return digest.hexdigest(), completed, _file_identity(before)
+
+
+def _sha256_file(path: Path) -> str:
+    digest, _length, _identity = _sha256_file_identity(path)
+    return digest
 
 
 def _descriptor(path: Path, relative: str, array: np.ndarray) -> dict[str, Any]:
@@ -500,6 +559,17 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
     if not root.is_dir() or root.is_symlink() or is_reparse_point(root):
         raise ResultBundleError("Result root is not an ordinary directory")
     manifest = read_json(root / "manifest.json")
+    if isinstance(manifest, dict):
+        version = manifest.get("schema_version")
+        match = (
+            re.fullmatch(r"([0-9]+)\.[0-9]+\.[0-9]+", version)
+            if isinstance(version, str)
+            else None
+        )
+        if match is not None and int(match.group(1)) != 1:
+            raise ResultBundleError(
+                "Incompatible Result: unknown schema major is retained but inactive"
+            )
     fields = {
         "schema_version", "result_id", "job_id", "created_utc", "target_scene",
         "timeline_start", "source", "contracts", "profile", "coordinate_system",
@@ -657,9 +727,17 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
         contract = ArrayContract(str(descriptor["dtype"]), shape)
         if contract.dtype != RESULT_ARRAY_DTYPES[name]:
             raise ResultBundleError(f"array descriptor dtype is invalid: {name}")
-        array = validate_npy_file(path, contract)
-        if path.stat().st_size != descriptor["byte_length"] or _sha256_file(path) != descriptor["sha256"]:
+        digest, byte_length, trusted_identity = _sha256_file_identity(path)
+        if (
+            byte_length != descriptor["byte_length"]
+            or digest != descriptor["sha256"]
+        ):
             raise ResultBundleError(f"array descriptor length or checksum is invalid: {name}")
+        array = validate_npy_file(
+            path,
+            contract,
+            expected_identity=trusted_identity,
+        )
         arrays[name] = array
         declared.add(relative)
     point_count, frame_count = _validate_semantics(arrays)

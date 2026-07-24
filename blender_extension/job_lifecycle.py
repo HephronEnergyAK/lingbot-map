@@ -1218,7 +1218,29 @@ class JobController:
         if not entries:
             return
         job_dir = entries[0]
-        control = validate_control(read_json(job_dir / "job-control.json"))
+        raw_control = read_json(job_dir / "job-control.json")
+        schema_version = (
+            raw_control.get("schema_version")
+            if isinstance(raw_control, dict)
+            else None
+        )
+        if schema_version != SCHEMA_VERSION:
+            match = (
+                re.fullmatch(r"([0-9]+)\.[0-9]+\.[0-9]+", schema_version)
+                if isinstance(schema_version, str)
+                else None
+            )
+            if match is not None and int(match.group(1)) != 1:
+                self._publish(
+                    JobSnapshot(
+                        "legacy_running",
+                        "Legacy Job Running; use a compatible Extension to monitor or cancel it",
+                        job_dir.name,
+                        location=str(job_dir),
+                    )
+                )
+                return
+        control = validate_control(raw_control)
         if control["job_id"] != job_dir.name:
             raise IpcError("active directory and Job Control identity differ")
         record = _record_from_control(control)

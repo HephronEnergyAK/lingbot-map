@@ -1,0 +1,53 @@
+name: Untrusted input security gate
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches:
+      - main
+      - codex/reconstruction-0.1.0
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release-blocking-untrusted-input:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install bounded parser test dependencies
+        run: python -m pip install --disable-pip-version-check numpy==2.2.6 pillow==12.3.0
+      - name: Run deterministic coverage-guided fuzz corpus
+        run: >-
+          python scripts/run_untrusted_fuzz.py
+          --seed 0x21C0DEC0
+          --cases 5000
+          --failure-dir artifacts/untrusted-fuzz
+      - name: Run property, lifecycle, Result, and diagnostics security tests
+        run: >-
+          python -m unittest
+          tests.test_untrusted_input_fuzz
+          tests.test_diagnostics
+          tests.test_job_lifecycle
+          tests.test_project_lifecycle
+          tests.test_result_import
+          tests.test_result_pipeline
+          -v
+      - name: Prove isolated Worker launch semantics
+        run: python tests/worker_isolation_windows_integration.py
+      - name: Retain seed, summary, and minimal failing cases
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: untrusted-input-fuzz-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/untrusted-fuzz
+          if-no-files-found: error
+          retention-days: 30

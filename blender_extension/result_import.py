@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import struct
 from typing import Any, Callable, Mapping
 import uuid
@@ -123,6 +124,7 @@ IMPORT_PHASES = (
 
 CancelCheck = Callable[[str], bool]
 AvailableMemoryProbe = Callable[[], int]
+FileIdentity = tuple[int, int, int, int]
 
 
 class ResultImportError(RuntimeError):
@@ -465,25 +467,71 @@ def _plain_relative_file(root: Path, raw: Any) -> Path:
     return path
 
 
-def _stable_sha256(
+def _file_identity(value: Any) -> FileIdentity:
+    return (
+        int(getattr(value, "st_dev", 0)),
+        int(getattr(value, "st_ino", 0)),
+        int(getattr(value, "st_size", 0)),
+        int(getattr(value, "st_mtime_ns", 0)),
+    )
+
+
+def _ordinary_file_stat(path: Path) -> os.stat_result:
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise ResultImportError(
+            f"Result file cannot be inspected safely: {path.name}"
+        ) from exc
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or stat.S_ISLNK(value.st_mode)
+        or bool(
+            getattr(value, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+    ):
+        raise ResultImportError(f"Result file is not ordinary: {path.name}")
+    return value
+
+
+def _stable_sha256_identity(
     path: Path, *, cancel: CancelCheck | None = None, phase: str = "validation"
-) -> tuple[str, int]:
-    before = path.stat()
+) -> tuple[str, int, FileIdentity]:
+    before = _ordinary_file_stat(path)
     digest = hashlib.sha256()
     completed = 0
     with path.open("rb") as stream:
+        handle_before = os.fstat(stream.fileno())
+        if _file_identity(handle_before) != _file_identity(before):
+            raise ResultImportError(
+                f"Result file changed before validation: {path.name}"
+            )
         while chunk := stream.read(HASH_CHUNK_BYTES):
             _cancelled(cancel, phase)
             digest.update(chunk)
             completed += len(chunk)
-    after = path.stat()
+        handle_after = os.fstat(stream.fileno())
+    after = _ordinary_file_stat(path)
     if (
-        before.st_size != after.st_size
-        or before.st_mtime_ns != after.st_mtime_ns
+        _file_identity(before) != _file_identity(handle_before)
+        or _file_identity(handle_before) != _file_identity(handle_after)
+        or _file_identity(handle_after) != _file_identity(after)
         or completed != before.st_size
     ):
         raise ResultImportError(f"Result file changed during validation: {path.name}")
-    return digest.hexdigest(), completed
+    return digest.hexdigest(), completed, _file_identity(before)
+
+
+def _stable_sha256(
+    path: Path, *, cancel: CancelCheck | None = None, phase: str = "validation"
+) -> tuple[str, int]:
+    digest, completed, _identity = _stable_sha256_identity(
+        path,
+        cancel=cancel,
+        phase=phase,
+    )
+    return digest, completed
 
 
 def _npy_header(path: Path) -> tuple[str, bool, tuple[int, ...], int]:
@@ -577,15 +625,21 @@ def _array_descriptor(
     expected_size = offset + math.prod(expected_shape) * np.dtype(dtype).itemsize
     if path.stat().st_size != expected_size:
         raise ResultImportError(f"NPY payload length is inconsistent: {name}")
-    digest, byte_length = _stable_sha256(
+    digest, byte_length, trusted_identity = _stable_sha256_identity(
         path, cancel=cancel, phase=f"validation:{name}"
     )
     if byte_length != descriptor["byte_length"] or digest != descriptor["sha256"]:
         raise ResultImportError(f"Array checksum or length mismatch: {name}")
+    immediately_before = _ordinary_file_stat(path)
+    if _file_identity(immediately_before) != trusted_identity:
+        raise ResultImportError(f"Array changed before consumption: {name}")
     try:
         array = np.load(path, mmap_mode="r", allow_pickle=False)
     except (OSError, ValueError, MemoryError) as exc:
         raise ResultImportError(f"NPY cannot be opened safely: {name}") from exc
+    immediately_after = _ordinary_file_stat(path)
+    if _file_identity(immediately_after) != trusted_identity:
+        raise ResultImportError(f"Array changed during consumption: {name}")
     if (
         array.dtype.str != dtype
         or tuple(array.shape) != expected_shape

@@ -22,6 +22,7 @@ from .runtime_setup import (
     process_identity,
     sha256_file,
 )
+from .worker_environment import worker_environment as _worker_environment
 
 
 GPU_UUID = re.compile(r"^(?:GPU|MIG)-[A-Za-z0-9-]{8,90}$")
@@ -56,27 +57,6 @@ class CapabilitySnapshot:
     completed: int = 0
     total: int = 0
     results: tuple[Mapping[str, object], ...] = ()
-
-
-def _worker_environment() -> dict[str, str]:
-    environment: dict[str, str] = {}
-    for name in ("SystemRoot", "WINDIR", "TEMP", "TMP", "LOCALAPPDATA"):
-        value = os.environ.get(name)
-        if value:
-            environment[name] = value
-    environment.update(
-        {
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONUTF8": "1",
-            "HF_HUB_OFFLINE": "1",
-            "TRANSFORMERS_OFFLINE": "1",
-            # getpass.getuser() imports POSIX-only pwd when every user-name
-            # variable is absent. Use a non-authoritative fixed value rather
-            # than inheriting user-controlled identity into the Worker.
-            "USERNAME": "LingBotMapWorker",
-        }
-    )
-    return environment
 
 
 def _runtime_command(managed_root: Path) -> tuple[Path, Path, str, str]:

@@ -187,6 +187,17 @@ def read_ready_result(
     ):
         raise IpcError("Result directory is not an ordinary canonical publication")
     manifest = read_json(directory / "manifest.json")
+    if isinstance(manifest, dict):
+        version = manifest.get("schema_version")
+        match = (
+            re.fullmatch(r"([0-9]+)\.[0-9]+\.[0-9]+", version)
+            if isinstance(version, str)
+            else None
+        )
+        if match is not None and int(match.group(1)) != 1:
+            raise IpcError(
+                "Incompatible Result: unknown schema major is retained but inactive"
+            )
     required_fields = {
             "schema_version", "result_id", "job_id", "created_utc", "target_scene",
             "timeline_start", "source", "contracts", "profile", "coordinate_system",

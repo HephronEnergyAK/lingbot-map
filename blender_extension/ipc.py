@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import stat
 import time
 from typing import Any, Mapping
 import uuid
@@ -62,20 +63,53 @@ def parse_json_bytes(data: bytes, *, maximum: int = MAX_DOCUMENT_BYTES) -> Any:
             object_pairs_hook=_reject_duplicates,
             parse_constant=_reject_constant,
         )
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise IpcError(f"invalid UTF-8 JSON: {exc}") from exc
     _validate_tree(value)
     return value
 
 
 def read_json(path: Path, *, maximum: int = MAX_DOCUMENT_BYTES) -> Any:
+    path = Path(path)
     try:
-        if not path.is_file() or path.is_symlink():
+        before = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or bool(
+                getattr(before, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            )
+        ):
             raise IpcError(f"IPC path is not an ordinary file: {path.name}")
-        size = path.stat().st_size
-        if size > maximum:
-            raise IpcError(f"JSON input exceeds {maximum} bytes")
-        return parse_json_bytes(path.read_bytes(), maximum=maximum)
+        with path.open("rb") as stream:
+            handle_before = os.fstat(stream.fileno())
+            if (
+                handle_before.st_dev,
+                handle_before.st_ino,
+            ) != (before.st_dev, before.st_ino):
+                raise IpcError(f"IPC file changed before read: {path.name}")
+            data = stream.read(maximum + 1)
+            handle_after = os.fstat(stream.fileno())
+        after = path.lstat()
+        identity = lambda value: (
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtime_ns,
+        )
+        if (
+            identity(before) != identity(handle_before)
+            or identity(handle_before) != identity(handle_after)
+            or identity(handle_after) != identity(after)
+            or stat.S_ISLNK(after.st_mode)
+            or bool(
+                getattr(after, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            )
+        ):
+            raise IpcError(f"IPC file changed while reading: {path.name}")
+        return parse_json_bytes(data, maximum=maximum)
     except OSError as exc:
         raise IpcError(f"cannot read IPC file {path.name}: {exc}") from exc
 

@@ -542,11 +542,37 @@ def _heartbeat_loop(store: StatusStore, stop: threading.Event, interval: float, 
 
 
 def _install_audit_policy() -> None:
-    denied_prefixes = ("socket.connect", "socket.bind", "subprocess.", "os.system", "os.spawn")
+    denied_prefixes = (
+        "socket.connect",
+        "socket.bind",
+        "subprocess.",
+        "os.fork",
+        "os.forkpty",
+        "os.system",
+        "os.spawn",
+        "os.exec",
+        "os.posix_spawn",
+        "os.startfile",
+        "pty.spawn",
+    )
+
     def audit(event, _arguments):
         if event.startswith(denied_prefixes):
             raise PermissionError(f"offline Worker policy denied audit event {event}")
+
     sys.addaudithook(audit)
+
+    # ``multiprocessing`` spawn does not consistently emit a subprocess audit
+    # event on Windows. Permanently close its process-start seam in the Worker
+    # process in addition to the interpreter-wide audit hook.
+    from multiprocessing.process import BaseProcess
+
+    def deny_multiprocessing_start(_process, *_args, **_kwargs):
+        raise PermissionError(
+            "offline Worker policy denied multiprocessing process creation"
+        )
+
+    BaseProcess.start = deny_multiprocessing_start
 
 
 @contextmanager
