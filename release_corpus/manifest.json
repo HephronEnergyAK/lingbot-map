@@ -1,0 +1,197 @@
+{
+  "schema_version": "1.0.0",
+  "corpus_id": "lingbot-map-release-corpus-0.1.0",
+  "privacy": {
+    "personal_capture_sources": false,
+    "repository_media_only": true,
+    "policy": "No private user Capture Source may be copied into this corpus, a test artifact, a release package, or CI storage."
+  },
+  "storage": {
+    "checked_in_media": false,
+    "generated_media_location": "caller-supplied empty scratch directory",
+    "goldens_location": "release_corpus/generated-goldens.json",
+    "reason": "Media is deterministically regenerated and checksum-qualified; large binary outputs are not committed."
+  },
+  "generator": {
+    "id": "lingbot-release-corpus-media-v1",
+    "script": "scripts/build_release_corpus.py",
+    "runtime": {
+      "python": "3.10.20",
+      "pyav": "17.1.0",
+      "numpy": "2.2.6"
+    },
+    "ordinary_command": "python scripts/build_release_corpus.py <empty-output>",
+    "milestone_command": "python scripts/build_release_corpus.py <empty-output> --include-stress"
+  },
+  "synthetic_coverage": {
+    "boundary_frame_counts": [8, 320, 321, 3000, 3001],
+    "vfr_pts_milliseconds": [0, 33, 67, 101, 151, 184, 250, 284],
+    "display_transforms": [
+      "identity",
+      "rotate_90_ccw",
+      "rotate_180",
+      "rotate_270_ccw",
+      "reflect_x",
+      "reflect_y",
+      "reflect_main_diagonal",
+      "reflect_anti_diagonal"
+    ],
+    "display_transform_representation": {
+      "kind": "decoder-adapter frame fixtures plus exact pixel and Blender visual oracles",
+      "reason": "PyAV cannot portably author every MP4 display-matrix variant; decoder side-data behavior is exercised at the adapter seam and all eight presentation variants are exercised by Blender.",
+      "test_ids": [
+        "tests.test_preflight.DecoderAdapterTests.test_all_color_range_and_eight_transform_combinations_are_deterministic",
+        "tests.test_preflight.DecoderAdapterTests.test_transform_pixels_have_exact_oracles_and_unsupported_matrices_fail",
+        "tests.test_source_view.SourceViewTests.test_all_eight_display_transforms_have_exact_pixel_oracles"
+      ]
+    },
+    "color_descriptions": [
+      {"standard": "bt709", "range": "limited"},
+      {"standard": "bt709", "range": "full"},
+      {"standard": "bt601", "range": "limited"},
+      {"standard": "bt601", "range": "full"}
+    ],
+    "rejected_media_classes": [
+      {"id": "interlaced", "representation": "decoder-frame-adapter", "expected": "reject"},
+      {"id": "alpha", "representation": "decoder-frame-adapter", "expected": "reject"},
+      {"id": "non-square-pixels", "representation": "decoder-frame-adapter", "expected": "reject"},
+      {"id": "unsupported-hdr", "representation": "decoder-frame-adapter", "expected": "reject"},
+      {"id": "changing-stream-properties", "representation": "decoder-frame-adapter", "expected": "reject"},
+      {"id": "ambiguous-video-tracks", "representation": "decoder-container-adapter", "expected": "reject"},
+      {"id": "corrupt-frame", "representation": "decoder-frame-adapter-and-late-decode-error", "expected": "reject"},
+      {"id": "non-monotonic-timestamp", "representation": "decoder-frame-adapter", "expected": "reject"},
+      {"id": "fewer-than-eight-frames", "representation": "decoder-frame-adapter", "expected": "reject"},
+      {"id": "unsupported-display-matrix", "representation": "decoder-side-data-adapter", "expected": "reject"},
+      {
+        "id": "edited-take-declaration",
+        "representation": "explicit Job Draft declaration",
+        "expected": "reject-before-launch",
+        "note": "Version 0.1.0 does not silently infer edits from pixels or container heuristics."
+      }
+    ],
+    "rejection_test_id": "tests.test_preflight.DecoderAdapterTests.test_every_rejected_frame_class_minimum_vfr_cancel_late_failure_and_replacement"
+  },
+  "real_captures": [
+    {
+      "id": "real-courthouse-streaming-286",
+      "status": "ready",
+      "classification": "streaming",
+      "presentation_frames": 286,
+      "provenance": {
+        "repository_path": "example/courthouse/*.png",
+        "repository_commit": "1880692d82fb24368231bd59fe509254f1bf69d3",
+        "git_tree_sha1": "ae9d419c91d5949fbc6ec02b739ff3d0ae4787c9",
+        "source_files": 286,
+        "ordered_name_and_sha256_manifest": "d47e72fdd5aaac8554a92b5ca7f2c536ca36bc248853b153a201a3987a29369d"
+      },
+      "acquisition_recipe": "Encode the ordered repository PNG sequence at 30 fps with scripts/build_release_corpus.py.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidence_path": "LICENSE.txt",
+        "evidence_sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6",
+        "scope": "Repository source tree including example/courthouse"
+      },
+      "storage": "repository source PNGs; generated MP4 remains in caller scratch storage",
+      "generated_sha256": "7ea874def95e1ef1466f08c2349deb5679bd4b9b87d0743890a7d77574f6cf40"
+    },
+    {
+      "id": "real-windowed-above-3000",
+      "status": "blocked-external",
+      "classification": "windowed",
+      "presentation_frames": ">3000",
+      "provenance": null,
+      "acquisition_recipe": null,
+      "license": null,
+      "storage": null,
+      "blocker": "No available real capture above 3000 frames has explicit redistribution rights and complete provenance."
+    }
+  ],
+  "unapproved_external_candidates": [
+    {
+      "id": "lingbot-map-demo-indoor-travel",
+      "source": "https://huggingface.co/datasets/robbyant/lingbot-map-demo/blob/main/indoor_travel.MP4",
+      "description": "Approximately 25,000-frame, 13-minute indoor walkthrough",
+      "bytes": 5620000000,
+      "sha256": "ca590d8af33c465953d6ed6c305557e4b4d7cc6ba3710b4c65872bbf06b684e0",
+      "xet_hash": "a36f9a2a96a34db58f7796e835a1377336dec91d82702a72ec48977f611b5e8e",
+      "rights_status": "blocked-missing-explicit-license",
+      "approved_for_download_or_redistribution": false
+    }
+  ],
+  "stress_capture": {
+    "id": "synthetic-stress-25000",
+    "status": "ready",
+    "presentation_frames": 25000,
+    "classification": "windowed",
+    "cadence": "release-candidate-or-milestone-only",
+    "generated_sha256": "408aca12995e8913c013198cd721631252aca51869939b4f368de64bd0ce6f22",
+    "real_capture_status": "blocked-missing-explicit-license"
+  },
+  "oracles": {
+    "exact": "release_corpus/exact-oracles.json",
+    "neural": "release_corpus/neural-oracles.json",
+    "generated_decoder": "release_corpus/generated-goldens.json",
+    "blender_visual": {
+      "fixture_builder": "tests/build_source_view_fixture.py",
+      "windows_runner": "tests/run_blender_source_view_visual.ps1",
+      "isolated_preferences": "tests/blender_visual_preferences.py",
+      "blender_driver": "tests/blender_source_view_visual.py",
+      "blender_version": "5.2",
+      "coverage": ["animated-camera", "source-background", "model-coverage"],
+      "display_transforms": 8,
+      "tolerance_display_pixels": 1.0,
+      "requires_visible_gui": true
+    }
+  },
+  "failure_and_lifecycle_fixtures": [
+    {
+      "category": "resource",
+      "test_ids": [
+        "tests.test_result_pipeline.ResourceGateTests.test_disk_and_physical_memory_boundaries_are_exact",
+        "tests.test_result_pipeline.ResourceGateTests.test_gate_failure_leaves_no_partial_result"
+      ]
+    },
+    {
+      "category": "cancellation",
+      "test_ids": [
+        "tests.test_short_pipeline.ShortPipelineTests.test_cuda_resource_and_cancellation_fail_without_retry_or_finish",
+        "tests.test_long_pipeline.LongPipelineTests.test_cancellation_closes_predictor_and_never_finishes",
+        "tests.test_result_pipeline.SafeBundleTests.test_failure_and_precommit_cancel_publish_no_result_but_retain_diagnostics"
+      ]
+    },
+    {
+      "category": "lifecycle",
+      "test_ids": [
+        "tests.test_project_lifecycle.ProjectLifecycleTests.test_result_trash_and_restore_preserve_exact_content",
+        "tests.test_project_lifecycle.ProjectLifecycleTests.test_multi_diagnostic_trash_and_cancellable_partial_delete"
+      ]
+    },
+    {
+      "category": "corruption",
+      "test_ids": [
+        "tests.test_result_pipeline.SafeBundleTests.test_npy_rejects_fortran_object_wrong_dtype_shape_and_trailing_bytes",
+        "tests.test_result_pipeline.SafeBundleTests.test_manifest_checksum_cross_semantics_and_undeclared_files_are_rejected"
+      ]
+    },
+    {
+      "category": "replacement-race",
+      "test_ids": [
+        "tests.test_preflight.DecoderAdapterTests.test_every_rejected_frame_class_minimum_vfr_cancel_late_failure_and_replacement",
+        "tests.test_project_lifecycle.ProjectLifecycleTests.test_plan_detects_source_and_destination_replacement_races",
+        "tests.test_project_lifecycle.ProjectLifecycleTests.test_result_change_during_complete_validation_is_rejected"
+      ]
+    }
+  ],
+  "release_gates": [
+    {
+      "id": "real-windowed-capture-rights",
+      "status": "blocked-external",
+      "resolution": "Supply a real >3000-frame Continuous Take with explicit redistribution license, acquisition provenance, recipe, checksum, classification, and approved storage."
+    },
+    {
+      "id": "ada-release-suite",
+      "status": "blocked-external",
+      "resolution": "Run the complete native release suite, including the calibrated neural ranges, on an Ada consumer GPU with at least 16 GB and verify behavior when higher Profiles do not qualify."
+    }
+  ]
+}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 import sys
 import traceback
@@ -15,7 +16,12 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = Path(r"C:\tmp\lingbot-map-source-view15")
+FIXTURE = Path(
+    os.environ.get(
+        "LINGBOT_MAP_SOURCE_VIEW_FIXTURE",
+        r"C:\tmp\lingbot-map-source-view15",
+    )
+).resolve()
 OUTPUT = FIXTURE / "visual"
 STATE = {
     "cases": [],
@@ -98,19 +104,26 @@ def _bbox_error(actual, expected):
     return max(abs(left - right) for left, right in zip(actual, expected))
 
 
-def _point_segment_distance(point, start, end):
+def _point_segment_projection(point, start, end):
     px, py = point
     ax, ay = start
     bx, by = end
     dx, dy = bx - ax, by - ay
     length_squared = dx * dx + dy * dy
     if length_squared == 0:
-        return math.hypot(px - ax, py - ay)
+        return 0.0, math.hypot(px - ax, py - ay)
     amount = max(
         0.0,
         min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_squared),
     )
-    return math.hypot(px - (ax + amount * dx), py - (ay + amount * dy))
+    return (
+        amount,
+        math.hypot(px - (ax + amount * dx), py - (ay + amount * dy)),
+    )
+
+
+def _point_segment_distance(point, start, end):
+    return _point_segment_projection(point, start, end)[1]
 
 
 def _analyze_screenshot(path, transform, frame_index, guide_enabled):
@@ -238,11 +251,25 @@ def _analyze_screenshot(path, transform, frame_index, guide_enabled):
             )
             for point in points
         )
-        vertex_error = max(
-            min(math.dist(vertex, point) for point in points)
-            for vertex in polygon
-        )
-        coverage_error = max(coverage_error, vertex_error)
+        # The guide is alpha-blended over the decoder's colored corner
+        # markers. Those exact corner pixels need not satisfy the orange mask,
+        # so endpoint proximity is not an alignment oracle. Require every
+        # segment to be visible through its middle half instead, while the
+        # maximum perpendicular error above retains the exact one-display-pixel
+        # alignment bound.
+        for start, end in segments:
+            amounts = [
+                amount
+                for point in points
+                for amount, distance in (
+                    _point_segment_projection(point, start, end),
+                )
+                if distance <= 1.0
+            ]
+            if not any(0.25 <= amount <= 0.75 for amount in amounts):
+                raise AssertionError(
+                    f"{transform} Model Coverage segment is absent"
+                )
         if coverage_error > 1.0:
             raise AssertionError(
                 f"{transform} coverage error {coverage_error:.3f} "
@@ -483,13 +510,9 @@ def _setup_guarded():
     return None
 
 
-def _dismiss_quick_setup():
-    window = bpy.context.window_manager.windows[0]
-    window.event_simulate(type="ESC", value="PRESS")
-    window.event_simulate(type="ESC", value="RELEASE")
-    bpy.app.timers.register(_setup_guarded, first_interval=0.5)
-    return None
-
-
 if __name__ == "__main__":
-    bpy.app.timers.register(_dismiss_quick_setup, first_interval=1.0)
+    # The Windows runner supplies an isolated userpref.blend with the splash
+    # disabled. Blender timers do not advance while a fresh-profile splash owns
+    # the temporary window, and the splash-close operator is not registered
+    # early enough for a --python script to close it reliably.
+    bpy.app.timers.register(_setup_guarded, first_interval=0.5)

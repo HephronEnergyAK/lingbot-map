@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from lingbot_map.model_adapter import (
     AdapterStateError,
@@ -142,6 +143,21 @@ class ReconstructionModelAdapterTests(unittest.TestCase):
             with self.subTest(message=message):
                 with self.assertRaisesRegex(ValueError, message):
                     GCTStreamBackend(model, torch_module=object())
+
+    def test_native_backend_converts_canonical_numpy_like_input_to_tensor(self):
+        converted = []
+        tensor = object()
+        fake_torch = SimpleNamespace(
+            is_tensor=lambda value: value is tensor,
+            as_tensor=lambda value: converted.append(value) or tensor,
+        )
+        backend = GCTStreamBackend(NativeModelDouble(), torch_module=fake_torch)
+        canonical = object()
+
+        self.assertIs(backend._input_tensor(canonical), tensor)
+        self.assertIs(backend._input_tensor(tensor), tensor)
+        self.assertEqual(converted, [canonical])
+        backend.close()
 
     def test_incremental_scale_keyframe_and_non_keyframe_order(self):
         backend = RecordingBackend()

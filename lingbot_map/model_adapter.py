@@ -426,7 +426,9 @@ class GCTStreamBackend:
                 f"expected {self._num_scale_frames} scale frames, got {len(scale_frames)}"
             )
         self._model.clean_kv_cache()
-        images = self._torch.stack(tuple(scale_frames), dim=0).unsqueeze(0)
+        images = self._torch.stack(
+            tuple(self._input_tensor(frame) for frame in scale_frames), dim=0
+        ).unsqueeze(0)
         images = self._move_input(images)
         output = self._forward(
             images,
@@ -437,7 +439,7 @@ class GCTStreamBackend:
 
     def predict(self, frame: Any, *, persist_keyframe: bool) -> PredictionBatch:
         self._require_open()
-        images = frame.unsqueeze(0).unsqueeze(0)
+        images = self._input_tensor(frame).unsqueeze(0).unsqueeze(0)
         images = self._move_input(images)
         if not persist_keyframe:
             self._model._set_skip_append(True)
@@ -475,6 +477,11 @@ class GCTStreamBackend:
         if self._device is None:
             return images
         return images.to(self._device, non_blocking=True)
+
+    def _input_tensor(self, frame: Any) -> Any:
+        if self._torch.is_tensor(frame):
+            return frame
+        return self._torch.as_tensor(frame)
 
     def _require_open(self) -> None:
         if self._closed:

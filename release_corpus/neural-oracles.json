@@ -1,0 +1,87 @@
+{
+  "schema_version": "1.0.0",
+  "cross_gpu_checksum_allowed": false,
+  "required_arrays": {
+    "world_to_camera_opencv.npy": {"dtype": "<f8", "shape": ["F", 4, 4]},
+    "model_intrinsics.npy": {"dtype": "<f8", "shape": ["F", 3, 3]},
+    "depth.npy": {"dtype": "<f4", "shape": ["F", "H", "W"]},
+    "confidence.npy": {"dtype": "<f4", "shape": ["F", "H", "W"]},
+    "source_pts_seconds.npy": {"dtype": "<f8", "shape": ["F"]},
+    "frame_type.npy": {"dtype": "|u1", "shape": ["F"]}
+  },
+  "required_invariants": [
+    "finite",
+    "exact-dtype-and-shape",
+    "right-handed-rigid-world-to-camera",
+    "positive-zero-skew-intrinsics",
+    "strictly-increasing-source-timestamps",
+    "contiguous-source-frame-alignment",
+    "source-runtime-model-profile-provenance"
+  ],
+  "invariant_tolerances": {
+    "rigid_orthonormal_atol": 1e-6
+  },
+  "range_metrics": [
+    "depth_p05",
+    "depth_median",
+    "depth_p95",
+    "confidence_p05",
+    "confidence_median",
+    "confidence_p95",
+    "camera_path_extent",
+    "rotation_step_p95_degrees"
+  ],
+  "fixtures": {
+    "real-courthouse-streaming-286": {
+      "status": "ready",
+      "expected_frame_count": 286,
+      "source_sha256": "7ea874def95e1ef1466f08c2349deb5679bd4b9b87d0743890a7d77574f6cf40",
+      "ranges": {
+        "depth_p05": [0.09, 0.38],
+        "depth_median": [0.32, 1.32],
+        "depth_p95": [5.0, 21.0],
+        "confidence_p05": [0.5, 2.0],
+        "confidence_median": [2.5, 11.0],
+        "confidence_p95": [6.0, 26.0],
+        "camera_path_extent": [1.9, 8.1],
+        "rotation_step_p95_degrees": [15.0, 63.0]
+      },
+      "calibration": {
+        "date": "2026-07-24",
+        "fixture": "generated licensed courthouse MP4",
+        "profile": "Draft",
+        "qualified_hardware_evidence": "Issue #10 commit c329e8269e5ec01fee485e36f8e87d4a7b06283f qualified Draft, Balanced, and High on this RTX 5090 reference GPU.",
+        "reference_system": {
+          "gpu": "NVIDIA GeForce RTX 5090",
+          "gpu_uuid": "GPU-3dd69ad9-06be-796b-5f6a-0a9159cd288c",
+          "compute_capability": [12, 0],
+          "driver": "610.47",
+          "torch": "2.11.0+cu130",
+          "cuda": "13.0",
+          "runtime_id": "7b9cb75d26fc9d1cb33a92526e60498d4b3a7654ffa64653c7bb90ca07a7c5dc",
+          "model_id": "lingbot-map-long",
+          "model_sha256": "832bc82cbae0bc9bbe946ef5ee1f7226abd8c0e183ccf8beddbb3d133576f409"
+        },
+        "observed_metrics": {
+          "depth_p05": 0.18436394408345225,
+          "depth_median": 0.6546502709388733,
+          "depth_p95": 10.29813289642334,
+          "confidence_p05": 1.0,
+          "confidence_median": 5.307115077972412,
+          "confidence_p95": 12.645671844482422,
+          "camera_path_extent": 3.962142609299367,
+          "rotation_step_p95_degrees": 30.979109023995868
+        },
+        "envelope_policy": "Rounded outward from one-half to twice the qualified Blackwell reference measurement. This rejects collapsed or explosive outputs while allowing architecture-level numeric variation.",
+        "cross_architecture_gate": "The complete suite, including these ranges, must still pass on an Ada consumer GPU with at least 16 GB before 1.0.0."
+      }
+    },
+    "real-windowed-above-3000": {
+      "status": "blocked-missing-redistribution-rights",
+      "expected_frame_count": null,
+      "source_sha256": null,
+      "ranges": null,
+      "blocker": "Acquire an explicitly redistributable real Continuous Take above 3000 frames before calibration."
+    }
+  }
+}
