@@ -19,7 +19,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
       - name: Validate catalogs and packaged manuals
         run: python scripts/validate_localization.py
       - name: Run localization and Extension shell tests
