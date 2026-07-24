@@ -55,6 +55,17 @@ class FakeLayout:
 
 def install_fake_bpy(version=(5, 2, 1)):
     registration = FakeRegistration()
+    class FakeFileImportMenu:
+        callbacks = []
+
+        @classmethod
+        def append(cls, callback):
+            cls.callbacks.append(callback)
+
+        @classmethod
+        def remove(cls, callback):
+            cls.callbacks.remove(callback)
+
     bpy = ModuleType("bpy")
     bpy.app = SimpleNamespace(version=version, online_access=False)
     bpy.types = SimpleNamespace(
@@ -62,6 +73,7 @@ def install_fake_bpy(version=(5, 2, 1)):
         Operator=type("Operator", (), {}),
         Panel=type("Panel", (), {}),
         Scene=type("Scene", (), {}),
+        TOPBAR_MT_file_import=FakeFileImportMenu,
     )
     bpy.utils = registration
 
@@ -236,10 +248,16 @@ class RegistrationTests(unittest.TestCase):
         expected = list(self.extension.CLASSES)
         self.assertEqual(self.registration.registered, expected)
         self.assertTrue(self.extension.get_host_decision().supported)
+        self.assertEqual(
+            len(self.bpy.types.TOPBAR_MT_file_import.callbacks), 1
+        )
 
         self.extension.unregister()
         self.assertEqual(self.registration.unregistered, list(reversed(expected)))
         self.assertIsNone(self.extension.get_host_decision())
+        self.assertEqual(
+            self.bpy.types.TOPBAR_MT_file_import.callbacks, []
+        )
 
         self.extension = importlib.reload(self.extension)
         with mock.patch.object(
@@ -284,6 +302,13 @@ class RegistrationTests(unittest.TestCase):
                 "lingbot_map.run_reconstruction_job",
                 "lingbot_map.cancel_active_job",
                 "lingbot_map.import_result",
+                "lingbot_map.repair_duplicate_scene_uuid",
+                "lingbot_map.import_result_into",
+                "lingbot_map.import_external_result",
+                "lingbot_map.relink_result_reference",
+                "lingbot_map.detach_result_copy",
+                "lingbot_map.resolve_duplicate_imports",
+                "lingbot_map.remove_result_version",
                 "lingbot_map.use_reconstruction_camera",
                 "lingbot_map.set_resolution_to_source",
                 "lingbot_map.relink_source_background",
@@ -391,6 +416,66 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(operator.execute(context), {"FINISHED"})
         self.assertEqual(preferences.gpu_uuid, device.uuid)
         start.assert_called_once_with(mock.ANY, device.uuid)
+
+    def test_import_into_confirmation_names_exact_original_and_actual_scenes(self):
+        operator_class = next(
+            item
+            for item in self.extension.CLASSES
+            if item.__name__ == "LINGBOTMAP_OT_import_result_into"
+        )
+        operator = operator_class()
+        operator.target_scene_pointer = "42"
+        operator.result_directory = r"C:\result"
+
+        class Target(dict):
+            name = "Chosen Target"
+
+        target = Target(
+            lingbot_map_scene_uuid="32345678-1234-4321-8765-123456789abc"
+        )
+        document = SimpleNamespace(
+            manifest={
+                "target_scene": {
+                    "scene_name": "Original Scene",
+                    "scene_uuid": "22345678-1234-4321-8765-123456789abc",
+                }
+            }
+        )
+        manager = SimpleNamespace(
+            invoke_props_dialog=mock.Mock(return_value={"RUNNING_MODAL"})
+        )
+        with (
+            mock.patch.object(self.ui, "_scene_from_pointer", return_value=target),
+            mock.patch.object(self.ui, "validate_result", return_value=document),
+        ):
+            outcome = operator.invoke(
+                SimpleNamespace(window_manager=manager), None
+            )
+        self.assertEqual(outcome, {"RUNNING_MODAL"})
+        self.assertIn("Chosen Target", operator.confirmation_target)
+        self.assertIn("Original Scene", operator.confirmation_original)
+        manager.invoke_props_dialog.assert_called_once_with(
+            operator, width=560
+        )
+
+    def test_failed_save_restores_scene_identity_save_gate(self):
+        scene = {
+            "lingbot_map_scene_uuid_save_required": True,
+        }
+        self.bpy.data = SimpleNamespace(scenes=(scene,))
+        self.extension._clear_scene_identity_save_markers_before_save(None)
+        self.assertNotIn(
+            "lingbot_map_scene_uuid_save_required", scene
+        )
+        self.extension._restore_scene_identity_markers_after_failed_save(None)
+        self.assertTrue(
+            scene["lingbot_map_scene_uuid_save_required"]
+        )
+        self.extension._clear_scene_identity_save_markers_before_save(None)
+        self.extension._finalize_scene_identity_markers_after_save(None)
+        self.assertNotIn(
+            "lingbot_map_scene_uuid_save_required", scene
+        )
 
     def test_gpu_selection_rejects_ordinal_and_ambiguous_auto_selection(self):
         first = self.gpu_capability.GpuDevice(

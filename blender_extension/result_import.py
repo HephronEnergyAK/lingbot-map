@@ -22,7 +22,12 @@ from typing import Any, Callable, Mapping
 import uuid
 
 from .ipc import IpcError, read_json, require_exact_object, require_text
-from .job_lifecycle import is_reparse_point
+from .job_lifecycle import (
+    ensure_unique_scene_uuid,
+    is_reparse_point,
+    normalized_blend_path,
+    project_result_root,
+)
 from .results import (
     CORE_ARRAYS,
     JOB_ID,
@@ -46,6 +51,21 @@ from .source_view import (
 
 
 OWNERSHIP_SCHEMA = "1.0.0"
+OWNERSHIP_IDENTITY_FIELDS = (
+    "lingbot_map_owner_schema",
+    "lingbot_map_result_id",
+    "lingbot_map_job_id",
+    "lingbot_map_manifest_sha256",
+    "lingbot_map_original_blend_path",
+    "lingbot_map_original_scene_uuid",
+    "lingbot_map_actual_scene_uuid",
+)
+REFERENCE_FIELDS = (
+    "lingbot_map_import_blend_path",
+    "lingbot_map_result_reference_mode",
+    "lingbot_map_result_reference_relative",
+    "lingbot_map_result_reference_absolute",
+)
 POINT_SHADER_SCHEMA = "point-shader-1.0.0"
 POINT_MATERIAL_SCHEMA = "point-material-1.0.0"
 POINT_DISPLAY_SCHEMA = "point-display-1.0.0"
@@ -150,6 +170,21 @@ class ImportOutcome:
     created: bool
     capacity: ImportCapacity
     message: str
+
+
+@dataclass(frozen=True)
+class OwnershipInspection:
+    status: str
+    message: str
+    datablocks: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
+class RemovalInventory:
+    collection_name: str
+    object_count: int
+    point_count: int
+    shared_datablock_count: int
 
 
 @dataclass
@@ -1135,27 +1170,332 @@ def _mark(datablock: Any, values: Mapping[str, Any]) -> None:
         datablock[name] = value
 
 
-def _valid_claim(collection: Any, document: ValidatedResult, scene: Any) -> bool:
-    expected = _metadata(document, scene, "reconstruction_collection")
-    if any(collection.get(name) != value for name, value in expected.items()):
-        return False
-    objects = tuple(collection.objects)
-    expected_kinds = {"reconstruction_root", "point_cloud"}
-    if document.source_view is not None:
-        expected_kinds.update(
+def _relative_result_reference(
+    directory: str | Path, blend_path: str | Path
+) -> str:
+    result = Path(os.path.abspath(directory))
+    blend = normalized_blend_path(blend_path)
+    try:
+        relative = os.path.relpath(result, blend.parent)
+    except ValueError:
+        return ""
+    return "//" + relative.replace(os.sep, "/")
+
+
+def _reference_metadata(
+    document: ValidatedResult, import_blend_path: str | Path
+) -> dict[str, str]:
+    current = normalized_blend_path(import_blend_path)
+    original = normalized_blend_path(
+        document.manifest["target_scene"]["blend_path"]
+    )
+    directory = Path(os.path.abspath(document.ready.directory))
+    expected_parent = project_result_root(original) / "results"
+    local = (
+        os.path.normcase(str(current)) == os.path.normcase(str(original))
+        and os.path.normcase(str(directory.parent))
+        == os.path.normcase(str(expected_parent))
+    )
+    return {
+        "lingbot_map_import_blend_path": str(current),
+        "lingbot_map_result_reference_mode": (
+            "project-owned" if local else "external-read-only"
+        ),
+        "lingbot_map_result_reference_relative": _relative_result_reference(
+            directory, current
+        ),
+        "lingbot_map_result_reference_absolute": str(directory),
+    }
+
+
+def effective_disk_authority(
+    collection: Any, current_blend_path: str | Path
+) -> str:
+    """Return current authority; Save As always reclassifies old data external."""
+
+    try:
+        current = normalized_blend_path(current_blend_path)
+        imported = normalized_blend_path(
+            str(collection.get("lingbot_map_import_blend_path", ""))
+        )
+    except (OSError, ValueError, RuntimeError):
+        return "external-read-only"
+    if os.path.normcase(str(current)) != os.path.normcase(str(imported)):
+        return "external-read-only"
+    mode = collection.get("lingbot_map_result_reference_mode")
+    return mode if mode in {"project-owned", "external-read-only"} else "unknown"
+
+
+def _owner_identity(collection: Any) -> dict[str, str] | None:
+    identity = {
+        name: collection.get(name) for name in OWNERSHIP_IDENTITY_FIELDS
+    }
+    if identity["lingbot_map_owner_schema"] != OWNERSHIP_SCHEMA:
+        return None
+    if (
+        not isinstance(identity["lingbot_map_result_id"], str)
+        or RESULT_ID.fullmatch(identity["lingbot_map_result_id"]) is None
+        or not isinstance(identity["lingbot_map_job_id"], str)
+        or JOB_ID.fullmatch(identity["lingbot_map_job_id"]) is None
+        or not isinstance(identity["lingbot_map_manifest_sha256"], str)
+        or SHA256.fullmatch(identity["lingbot_map_manifest_sha256"]) is None
+    ):
+        return None
+    try:
+        uuid.UUID(str(identity["lingbot_map_original_scene_uuid"]))
+        uuid.UUID(str(identity["lingbot_map_actual_scene_uuid"]))
+        normalized_blend_path(str(identity["lingbot_map_original_blend_path"]))
+    except (ValueError, OSError, RuntimeError):
+        return None
+    if any(
+        not isinstance(collection.get(name), str)
+        for name in REFERENCE_FIELDS
+    ):
+        return None
+    try:
+        normalized_blend_path(
+            collection.get("lingbot_map_import_blend_path")
+        )
+        absolute = Path(
+            os.path.abspath(
+                collection.get("lingbot_map_result_reference_absolute")
+            )
+        )
+    except (ValueError, OSError, RuntimeError):
+        return None
+    relative = collection.get("lingbot_map_result_reference_relative")
+    mode = collection.get("lingbot_map_result_reference_mode")
+    if (
+        not absolute.is_absolute()
+        or (relative and not relative.startswith("//"))
+        or mode not in {"project-owned", "external-read-only"}
+    ):
+        return None
+    return {name: str(value) for name, value in identity.items()}
+
+
+def _owner_matches(
+    datablock: Any, identity: Mapping[str, str], kind: str
+) -> bool:
+    return (
+        datablock is not None
+        and datablock.get("lingbot_map_kind") == kind
+        and all(datablock.get(name) == value for name, value in identity.items())
+    )
+
+
+def _owned_action(datablock: Any) -> Any | None:
+    animation = getattr(datablock, "animation_data", None)
+    return getattr(animation, "action", None)
+
+
+def inspect_collection_ownership(
+    collection: Any, scene: Any
+) -> OwnershipInspection:
+    """Validate the complete managed graph without relying on display names."""
+
+    identity = _owner_identity(collection)
+    if (
+        identity is None
+        or collection.get("lingbot_map_kind")
+        != "reconstruction_collection"
+        or str(scene.get("lingbot_map_scene_uuid", ""))
+        != identity.get("lingbot_map_actual_scene_uuid")
+    ):
+        return OwnershipInspection(
+            "unknown",
+            "Ownership Unknown: Collection identity is incomplete or contradictory",
+            (),
+        )
+    expected_object_kinds = {"reconstruction_root", "point_cloud"}
+    has_source_view = bool(collection.get("lingbot_map_source_display_json"))
+    if has_source_view:
+        expected_object_kinds.update(
             {"reconstruction_camera", "camera_trajectory"}
         )
-    if len(objects) != len(expected_kinds):
-        return False
-    kinds = {item.get("lingbot_map_kind") for item in objects}
-    if kinds != expected_kinds:
-        return False
-    for item in objects:
+    owned_objects: dict[str, Any] = {}
+    unowned_objects: list[Any] = []
+    for item in collection.objects:
         kind = item.get("lingbot_map_kind")
-        values = _metadata(document, scene, kind)
-        if any(item.get(name) != value for name, value in values.items()):
-            return False
-    return True
+        if kind in expected_object_kinds:
+            if kind in owned_objects or not _owner_matches(
+                item, identity, kind
+            ):
+                return OwnershipInspection(
+                    "unknown",
+                    "Ownership Unknown: managed Object metadata is contradictory",
+                    (),
+                )
+            owned_objects[kind] = item
+        elif any(item.get(name) is not None for name in OWNERSHIP_IDENTITY_FIELDS):
+            return OwnershipInspection(
+                "unknown",
+                "Ownership Unknown: unexpected Object claims managed identity",
+                (),
+            )
+        else:
+            unowned_objects.append(item)
+    if set(owned_objects) != expected_object_kinds:
+        return OwnershipInspection(
+            "unknown",
+            "Ownership Unknown: required managed Objects are missing",
+            (),
+        )
+    for child in collection.children:
+        if any(
+            child.get(name) is not None
+            for name in OWNERSHIP_IDENTITY_FIELDS
+        ):
+            return OwnershipInspection(
+                "unknown",
+                "Ownership Unknown: nested Collection claims managed identity",
+                (),
+            )
+
+    graph: list[Any] = [collection, *owned_objects.values()]
+    point_object = owned_objects["point_cloud"]
+    point_data = getattr(point_object, "data", None)
+    if not _owner_matches(point_data, identity, "point_cloud_data"):
+        return OwnershipInspection(
+            "unknown",
+            "Ownership Unknown: PointCloud data ownership is invalid",
+            (),
+        )
+    graph.append(point_data)
+    materials = tuple(getattr(point_data, "materials", ()))
+    if (
+        len(materials) != 1
+        or not _owner_matches(materials[0], identity, "point_material")
+        or materials[0].get("lingbot_map_schema") != POINT_MATERIAL_SCHEMA
+    ):
+        return OwnershipInspection(
+            "unknown",
+            "Ownership Unknown: point Material ownership is invalid",
+            (),
+        )
+    graph.append(materials[0])
+    geometry_groups = tuple(
+        getattr(modifier, "node_group", None)
+        for modifier in point_object.modifiers
+        if getattr(modifier, "type", None) == "NODES"
+    )
+    geometry_groups = tuple(item for item in geometry_groups if item is not None)
+    if (
+        len(geometry_groups) != 1
+        or not _owner_matches(
+            geometry_groups[0], identity, "point_display_nodes"
+        )
+        or geometry_groups[0].get("lingbot_map_schema")
+        != POINT_DISPLAY_SCHEMA
+    ):
+        return OwnershipInspection(
+            "unknown",
+            "Ownership Unknown: Geometry Nodes ownership is invalid",
+            (),
+        )
+    graph.append(geometry_groups[0])
+    shader_groups = tuple(
+        node.node_tree
+        for node in materials[0].node_tree.nodes
+        if getattr(node, "type", None) == "GROUP"
+        and getattr(node, "node_tree", None) is not None
+    )
+    if (
+        len(shader_groups) != 1
+        or shader_groups[0].get("lingbot_map_schema")
+        != POINT_SHADER_SCHEMA
+        or not bool(shader_groups[0].get("lingbot_map_managed", False))
+    ):
+        return OwnershipInspection(
+            "unknown",
+            "Ownership Unknown: shared point shader schema is invalid",
+            (),
+        )
+
+    if has_source_view:
+        for object_kind, data_kind in (
+            ("reconstruction_camera", "reconstruction_camera_data"),
+            ("camera_trajectory", "camera_trajectory_data"),
+        ):
+            data = getattr(owned_objects[object_kind], "data", None)
+            if not _owner_matches(data, identity, data_kind):
+                return OwnershipInspection(
+                    "unknown",
+                    f"Ownership Unknown: {data_kind} ownership is invalid",
+                    (),
+                )
+            graph.append(data)
+        for owner in (
+            owned_objects["reconstruction_camera"],
+            owned_objects["reconstruction_camera"].data,
+        ):
+            action = _owned_action(owner)
+            if action is not None:
+                if not _owner_matches(
+                    action, identity, "camera_animation_action"
+                ):
+                    return OwnershipInspection(
+                        "unknown",
+                        "Ownership Unknown: camera Action ownership is invalid",
+                        (),
+                    )
+                graph.append(action)
+        backgrounds = tuple(
+            owned_objects[
+                "reconstruction_camera"
+            ].data.background_images
+        )
+        background_status = str(
+            collection.get(
+                "lingbot_map_source_background_status", ""
+            )
+        )
+        if (
+            background_status == "attached-hidden"
+            and len(backgrounds) != 1
+        ) or (
+            background_status != "attached-hidden"
+            and backgrounds
+        ):
+            return OwnershipInspection(
+                "unknown",
+                "Ownership Unknown: Source Background attachment is contradictory",
+                (),
+            )
+        for background in backgrounds:
+            clip = getattr(background, "clip", None)
+            if (
+                getattr(background, "source", None) != "MOVIE_CLIP"
+                or not _owner_matches(
+                    clip, identity, "source_movie_clip"
+                )
+            ):
+                return OwnershipInspection(
+                    "unknown",
+                    "Ownership Unknown: Source Background clip ownership is invalid",
+                    (),
+                )
+            graph.append(clip)
+    unique: list[Any] = []
+    seen: set[int] = set()
+    for datablock in graph:
+        key = int(datablock.as_pointer()) if hasattr(datablock, "as_pointer") else id(datablock)
+        if key not in seen:
+            seen.add(key)
+            unique.append(datablock)
+    return OwnershipInspection(
+        "managed",
+        "Managed ownership metadata is complete and consistent",
+        tuple(unique),
+    )
+
+
+def _valid_claim(collection: Any, document: ValidatedResult, scene: Any) -> bool:
+    expected = _metadata(document, scene, "reconstruction_collection")
+    return (
+        all(collection.get(name) == value for name, value in expected.items())
+        and inspect_collection_ownership(collection, scene).status == "managed"
+    )
 
 
 def _scene_collections(scene: Any) -> tuple[Any, ...]:
@@ -1770,6 +2110,19 @@ def import_result(
         capacity = evaluate_import_capacity(
             document.ready.point_count, available_probe=available_probe
         )
+        if bpy_module is None:
+            import bpy as bpy_module  # type: ignore[import-not-found]
+
+        bpy = bpy_module
+        try:
+            ensure_unique_scene_uuid(
+                scene,
+                tuple(bpy.data.scenes),
+            )
+            current_blend_path = str(getattr(bpy.data, "filepath", ""))
+            normalized_blend_path(current_blend_path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ResultImportError(str(exc)) from exc
         existing = _find_existing(document, scene)
         if existing is not None:
             _select_existing(existing, context)
@@ -1782,10 +2135,6 @@ def import_result(
             )
             set_import_status(outcome.message)
             return outcome
-        if bpy_module is None:
-            import bpy as bpy_module  # type: ignore[import-not-found]
-
-        bpy = bpy_module
         created = _Created.empty()
         committed = False
         original_frame_end = int(scene.frame_end)
@@ -1896,6 +2245,10 @@ def import_result(
             )
             _mark(
                 collection,
+                _reference_metadata(document, current_blend_path),
+            )
+            _mark(
+                collection,
                 _source_view_properties(
                     document,
                     background_status=background_status,
@@ -1932,6 +2285,18 @@ def import_result(
                 _mark(
                     trajectory_data,
                     _metadata(document, scene, "camera_trajectory_data"),
+                )
+            for action in created.actions:
+                _mark(
+                    action,
+                    _metadata(
+                        document, scene, "camera_animation_action"
+                    ),
+                )
+            for movieclip in created.movieclips:
+                _mark(
+                    movieclip,
+                    _metadata(document, scene, "source_movie_clip"),
                 )
             _cancelled(cancel, "commit")
             scene.collection.children.link(collection)
@@ -2074,6 +2439,18 @@ def _load_imported_source_clip(
                 "Capture Source frame duration disagrees with the Result"
             )
         clip.frame_start = timeline_start
+        identity = _owner_identity(collection)
+        if identity is None:
+            raise ResultImportError(
+                "Ownership Unknown: cannot attach media to this Collection"
+            )
+        _mark(
+            clip,
+            {
+                **identity,
+                "lingbot_map_kind": "source_movie_clip",
+            },
+        )
         return clip, media
     except ResultImportError:
         _remove_movieclip_if_unused(bpy, clip)
@@ -2326,6 +2703,316 @@ def clear_model_coverage_guides() -> None:
             continue
 
 
+def _result_reference_candidates(
+    collection: Any, current_blend_path: str | Path
+) -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    relative = collection.get("lingbot_map_result_reference_relative")
+    if isinstance(relative, str) and relative.startswith("//"):
+        try:
+            blend = normalized_blend_path(current_blend_path)
+            candidates.append(
+                Path(
+                    os.path.abspath(
+                        blend.parent
+                        / Path(relative[2:].replace("/", os.sep))
+                    )
+                )
+            )
+        except (OSError, ValueError, RuntimeError):
+            pass
+    absolute = collection.get("lingbot_map_result_reference_absolute")
+    if isinstance(absolute, str) and absolute:
+        candidates.append(Path(os.path.abspath(absolute)))
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = os.path.normcase(str(candidate))
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return tuple(unique)
+
+
+def result_reference_status(
+    collection: Any, current_blend_path: str | Path
+) -> tuple[str, str | None]:
+    """Resolve relative then absolute identity without mutating imported data."""
+
+    result_id = collection.get("lingbot_map_result_id")
+    manifest_sha256 = collection.get("lingbot_map_manifest_sha256")
+    mismatch = False
+    for candidate in _result_reference_candidates(
+        collection, current_blend_path
+    ):
+        try:
+            ready = read_ready_result(candidate)
+            digest, _length = _stable_sha256(
+                candidate / "manifest.json",
+                cancel=None,
+                phase="reference:manifest",
+            )
+        except (IpcError, OSError, ResultImportError):
+            continue
+        if ready.result_id == result_id and digest == manifest_sha256:
+            return "available", str(candidate)
+        mismatch = True
+    return (
+        ("identity-mismatch", None)
+        if mismatch
+        else ("unavailable", None)
+    )
+
+
+def relink_result_reference(
+    collection: Any,
+    scene: Any,
+    directory: str | Path,
+    current_blend_path: str | Path,
+) -> str:
+    """Relink only after complete validation of immutable Result identity."""
+
+    if _owner_identity(collection) is None:
+        raise ResultImportError(
+            "Ownership Unknown: recorded Result identity cannot be trusted"
+        )
+    document = validate_result(directory)
+    if (
+        document.ready.result_id != collection.get("lingbot_map_result_id")
+        or document.manifest_sha256
+        != collection.get("lingbot_map_manifest_sha256")
+    ):
+        raise ResultImportError(
+            "Relink Result ID or manifest checksum does not match"
+        )
+    if (
+        str(scene.get("lingbot_map_scene_uuid", ""))
+        != collection.get("lingbot_map_actual_scene_uuid")
+    ):
+        raise ResultImportError(
+            "Ownership Unknown: actual Scene binding is contradictory"
+        )
+    values = _reference_metadata(document, current_blend_path)
+    _mark(collection, values)
+    return (
+        "Result reference relinked by exact Result ID and manifest checksum"
+    )
+
+
+def _managed_claims(scene: Any, result_id: str) -> tuple[Any, ...]:
+    return tuple(
+        collection
+        for collection in _scene_collections(scene)
+        if collection.get("lingbot_map_result_id") == result_id
+        and collection.get("lingbot_map_owner_schema") is not None
+    )
+
+
+def _clear_lingbot_identity(datablock: Any) -> None:
+    for name in tuple(datablock.keys()):
+        if str(name).startswith("lingbot_map_"):
+            del datablock[name]
+
+
+def _identity_matches(datablock: Any, identity: Mapping[str, str]) -> bool:
+    return datablock is not None and all(
+        datablock.get(name) == value for name, value in identity.items()
+    )
+
+
+def _exclusive_detach_graph(
+    collection: Any, identity: Mapping[str, str]
+) -> tuple[Any, ...]:
+    """Find only identity-bearing data not shared outside this Collection."""
+
+    found: list[Any] = []
+
+    def append_if_owned(datablock: Any) -> bool:
+        if _identity_matches(datablock, identity):
+            found.append(datablock)
+            return True
+        return False
+
+    def append_action(owner: Any) -> None:
+        action = _owned_action(owner)
+        if (
+            action is not None
+            and int(getattr(action, "users", 0)) <= 1
+        ):
+            append_if_owned(action)
+
+    for item in tuple(collection.objects):
+        if len(tuple(getattr(item, "users_collection", ()))) != 1:
+            continue
+        if not append_if_owned(item):
+            continue
+        append_action(item)
+        data = getattr(item, "data", None)
+        if data is None or int(getattr(data, "users", 0)) > 1:
+            continue
+        if not append_if_owned(data):
+            continue
+        append_action(data)
+        for material in tuple(getattr(data, "materials", ())):
+            if int(getattr(material, "users", 0)) <= 1:
+                append_if_owned(material)
+        for modifier in tuple(getattr(item, "modifiers", ())):
+            node_group = getattr(modifier, "node_group", None)
+            if (
+                node_group is not None
+                and int(getattr(node_group, "users", 0)) <= 1
+            ):
+                append_if_owned(node_group)
+        for background in tuple(
+            getattr(data, "background_images", ())
+        ):
+            clip = getattr(background, "clip", None)
+            if (
+                clip is not None
+                and int(getattr(clip, "users", 0)) <= 1
+            ):
+                append_if_owned(clip)
+    return tuple(found)
+
+
+def _detach_collection_copy(
+    collection: Any, identity: Mapping[str, str] | None
+) -> None:
+    exclusive = (
+        _exclusive_detach_graph(collection, identity)
+        if identity is not None
+        else ()
+    )
+    _clear_lingbot_identity(collection)
+    for datablock in exclusive:
+        _clear_lingbot_identity(datablock)
+
+
+def detach_collection_copy(collection: Any) -> None:
+    """Detach one Collection non-destructively, preserving shared datablocks."""
+
+    _detach_collection_copy(collection, _owner_identity(collection))
+
+
+def resolve_duplicate_imports(
+    scene: Any, result_id: str, keeper: Any
+) -> int:
+    claims = _managed_claims(scene, result_id)
+    if len(claims) < 2 or sum(item is keeper for item in claims) != 1:
+        raise ResultImportError(
+            "Choose exactly one duplicate imported Collection as keeper"
+        )
+    if inspect_collection_ownership(keeper, scene).status != "managed":
+        raise ResultImportError(
+            "The selected keeper does not have complete managed ownership"
+        )
+    keeper_identity = _owner_identity(keeper)
+    if keeper_identity is None:  # Guard the invariant across future changes.
+        raise ResultImportError(
+            "The selected keeper does not have complete managed ownership"
+        )
+    detached = 0
+    for collection in claims:
+        if collection is not keeper:
+            _detach_collection_copy(collection, keeper_identity)
+            detached += 1
+    return detached
+
+
+def removal_inventory(
+    collection: Any, scene: Any
+) -> RemovalInventory:
+    inspection = inspect_collection_ownership(collection, scene)
+    if inspection.status != "managed":
+        raise ResultImportError(inspection.message)
+    result_id = str(collection.get("lingbot_map_result_id", ""))
+    if len(_managed_claims(scene, result_id)) != 1:
+        raise ResultImportError(
+            "Duplicate Imported Identity: resolve copies before Remove Version"
+        )
+    point_object = next(
+        item
+        for item in collection.objects
+        if item.get("lingbot_map_kind") == "point_cloud"
+    )
+    points = getattr(getattr(point_object, "data", None), "points", ())
+    shared = sum(
+        int(getattr(datablock, "users", 0)) > 1
+        for datablock in inspection.datablocks
+        if datablock is not collection
+    )
+    return RemovalInventory(
+        str(getattr(collection, "name", "")),
+        len(tuple(collection.objects)),
+        len(points),
+        shared,
+    )
+
+
+def _unlink_collection_from_scene(scene: Any, target: Any) -> bool:
+    parents = [scene.collection]
+    changed = False
+    while parents:
+        parent = parents.pop()
+        for child in tuple(parent.children):
+            if child is target:
+                parent.children.unlink(target)
+                changed = True
+            else:
+                parents.append(child)
+    return changed
+
+
+def remove_managed_version(
+    collection: Any,
+    scene: Any,
+    *,
+    bpy_module: Any | None = None,
+) -> RemovalInventory:
+    """Remove only uniquely owned Blender data; disk Result is untouched."""
+
+    inventory = removal_inventory(collection, scene)
+    inspection = inspect_collection_ownership(collection, scene)
+    if bpy_module is None:
+        import bpy as bpy_module  # type: ignore[import-not-found]
+    bpy = bpy_module
+    owned_objects = tuple(
+        item
+        for item in collection.objects
+        if item in inspection.datablocks
+    )
+    unowned_objects = tuple(
+        item for item in collection.objects if item not in owned_objects
+    )
+    for item in unowned_objects:
+        if len(tuple(getattr(item, "users_collection", ()))) == 1:
+            scene.collection.objects.link(item)
+    for child in tuple(collection.children):
+        if child not in scene.collection.children[:]:
+            scene.collection.children.link(child)
+    _unlink_collection_from_scene(scene, collection)
+    if int(getattr(collection, "users", 0)) > 0:
+        return inventory
+
+    candidates = tuple(
+        datablock
+        for datablock in inspection.datablocks
+        if datablock is not collection and datablock not in owned_objects
+    )
+    for item in owned_objects:
+        if not tuple(getattr(item, "users_collection", ())):
+            bpy.data.objects.remove(item, do_unlink=True)
+    bpy.data.collections.remove(collection)
+    removable = tuple(
+        datablock
+        for datablock in candidates
+        if int(getattr(datablock, "users", 0)) == 0
+    )
+    if removable:
+        bpy.data.batch_remove(ids=set(removable))
+    return inventory
+
+
 _auto_attempted: set[tuple[str, str]] = set()
 
 
@@ -2408,6 +3095,8 @@ __all__ = [
     "ImportCapacity",
     "ImportCapacityError",
     "ImportOutcome",
+    "OwnershipInspection",
+    "RemovalInventory",
     "ResultImportCancelled",
     "ResultImportError",
     "ValidatedResult",
@@ -2415,11 +3104,19 @@ __all__ = [
     "available_physical_memory",
     "evaluate_import_capacity",
     "clear_model_coverage_guides",
+    "detach_collection_copy",
+    "effective_disk_authority",
     "find_reconstruction_camera",
     "get_import_status",
     "import_result",
     "imported_source_view_contract",
+    "inspect_collection_ownership",
+    "relink_result_reference",
     "relink_source_background",
+    "removal_inventory",
+    "remove_managed_version",
+    "resolve_duplicate_imports",
+    "result_reference_status",
     "set_import_status",
     "set_scene_resolution_to_source",
     "set_source_background_visibility",

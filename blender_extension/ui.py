@@ -4,6 +4,7 @@ from dataclasses import asdict
 import hashlib
 import json
 from pathlib import Path
+import uuid
 
 import bpy
 from bpy.props import BoolProperty, StringProperty
@@ -37,12 +38,17 @@ from .job_lifecycle import (
     POINT_BUDGET_PROPERTY,
     PROFILE_PROPERTY,
     RETAIN_DENSE_PROPERTY,
+    SCENE_UUID_SAVE_REQUIRED_PROPERTY,
     SKY_MASK_PROPERTY,
     cancel_active_job,
     capture_source_draft_path,
+    duplicate_scene_uuid_groups,
     ensure_unique_scene_uuid,
     get_job_snapshot,
     latest_successful_preflight,
+    normalized_blend_path,
+    project_result_root,
+    repair_duplicate_scene_uuids,
     start_fixture_job,
     start_preflight_job,
     start_reconstruction_job,
@@ -52,14 +58,23 @@ from .result_import import (
     ImportCapacityError,
     ResultImportCancelled,
     ResultImportError,
+    detach_collection_copy,
+    effective_disk_authority,
     get_import_status,
     find_reconstruction_camera,
     import_result,
+    inspect_collection_ownership,
+    relink_result_reference,
     relink_source_background,
+    removal_inventory,
+    remove_managed_version,
+    resolve_duplicate_imports,
+    result_reference_status,
     set_import_status,
     set_scene_resolution_to_source,
     set_source_background_visibility,
     toggle_model_coverage_guide,
+    validate_result,
 )
 
 
@@ -303,7 +318,10 @@ class LINGBOTMAP_OT_run_fixture_job(bpy.types.Operator):
             blend_path = bpy.data.filepath
             if not blend_path:
                 raise JobLifecycleError("Save the Blender file before launching a Job")
-            scene_uuid = ensure_unique_scene_uuid(context.scene, tuple(bpy.data.scenes))
+            scene_uuid = ensure_unique_scene_uuid(
+                context.scene,
+                tuple(bpy.data.scenes),
+            )
             if bpy.data.is_dirty:
                 raise JobLifecycleError("Save the .blend after its Scene UUID or other changes before launch")
             preferences = _preferences(context)
@@ -377,7 +395,10 @@ class LINGBOTMAP_OT_run_preflight_job(bpy.types.Operator):
                 raise JobLifecycleError(
                     "Capture Source was normalized for this Scene. Save the .blend, then launch the Job again."
                 )
-            scene_uuid = ensure_unique_scene_uuid(context.scene, tuple(bpy.data.scenes))
+            scene_uuid = ensure_unique_scene_uuid(
+                context.scene,
+                tuple(bpy.data.scenes),
+            )
             if bpy.data.is_dirty:
                 raise JobLifecycleError("Save the .blend after its Scene UUID or other changes before launch")
             preferences = _preferences(context)
@@ -416,7 +437,10 @@ class LINGBOTMAP_OT_run_reconstruction_job(bpy.types.Operator):
             scene = context.scene
             capture = str(getattr(scene, CAPTURE_SOURCE_PROPERTY, "")).strip()
             preflight = latest_successful_preflight(blend_path, capture)
-            scene_uuid = ensure_unique_scene_uuid(scene, tuple(bpy.data.scenes))
+            scene_uuid = ensure_unique_scene_uuid(
+                scene,
+                tuple(bpy.data.scenes),
+            )
             if bpy.data.is_dirty:
                 raise JobLifecycleError("Save the .blend after its Scene UUID or other changes before launch")
             preferences = _preferences(context)
@@ -549,6 +573,333 @@ class LINGBOTMAP_OT_import_result(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _scene_from_pointer(value):
+    matches = [
+        scene
+        for scene in bpy.data.scenes
+        if str(scene.as_pointer()) == str(value)
+    ]
+    if len(matches) != 1:
+        raise ResultImportError("Selected Scene is no longer uniquely available")
+    return matches[0]
+
+
+def _collection_from_pointer(value):
+    matches = [
+        collection
+        for collection in bpy.data.collections
+        if str(collection.as_pointer()) == str(value)
+    ]
+    if len(matches) != 1:
+        raise ResultImportError(
+            "Selected Collection is no longer uniquely available"
+        )
+    return matches[0]
+
+
+class LINGBOTMAP_OT_repair_scene_uuid(bpy.types.Operator):
+    bl_idname = "lingbot_map.repair_duplicate_scene_uuid"
+    bl_label = "Repair Duplicate Scene IDs"
+    bl_description = (
+        "Keep this explicitly selected Scene on the existing UUID and assign "
+        "new UUIDs to every other duplicate; existing Jobs are not rebound"
+    )
+
+    duplicate_uuid: StringProperty(options={"HIDDEN"})
+    keeper_pointer: StringProperty(options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_confirm(self, _event)
+
+    def execute(self, _context):
+        try:
+            keeper = _scene_from_pointer(self.keeper_pointer)
+            repaired = repair_duplicate_scene_uuids(
+                tuple(bpy.data.scenes),
+                self.duplicate_uuid,
+                keeper,
+            )
+        except (JobLifecycleError, ResultImportError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"},
+            f"Repaired {len(repaired)} duplicate Scene IDs; save the .blend",
+        )
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_import_result_into(bpy.types.Operator):
+    bl_idname = "lingbot_map.import_result_into"
+    bl_label = "Import Result Into Scene"
+    bl_description = (
+        "Explicitly import into another uniquely identified Scene while "
+        "preserving the Result's original binding"
+    )
+
+    result_directory: StringProperty(options={"HIDDEN"}, subtype="DIR_PATH")
+    target_scene_pointer: StringProperty(options={"HIDDEN"})
+    confirmation_target: StringProperty(options={"HIDDEN"})
+    confirmation_original: StringProperty(options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        try:
+            target = _scene_from_pointer(self.target_scene_pointer)
+            document = validate_result(self.result_directory)
+        except (ResultImportError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        original = document.manifest["target_scene"]
+        self.confirmation_target = (
+            f"{target.name} · "
+            f"{target.get('lingbot_map_scene_uuid', 'no UUID')}"
+        )
+        self.confirmation_original = (
+            f"{original['scene_name']} · {original['scene_uuid']}"
+        )
+        return context.window_manager.invoke_props_dialog(self, width=560)
+
+    def draw(self, _context):
+        self.layout.label(
+            text="Confirm this explicit Result binding",
+            icon="QUESTION",
+        )
+        self.layout.label(text=f"Original: {self.confirmation_original}")
+        self.layout.label(text=f"Actual target: {self.confirmation_target}")
+        self.layout.label(
+            text="The original binding remains recorded and is not changed"
+        )
+
+    def execute(self, context):
+        try:
+            target = _scene_from_pointer(self.target_scene_pointer)
+            outcome = import_result(
+                self.result_directory,
+                target,
+                context=context if target is context.scene else None,
+            )
+        except (
+            ImportCapacityError,
+            ResultImportCancelled,
+            ResultImportError,
+            OSError,
+            MemoryError,
+        ) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, outcome.message)
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_import_external_result(bpy.types.Operator):
+    bl_idname = "lingbot_map.import_external_result"
+    bl_label = "Import External Result"
+    bl_description = (
+        "Validate a selected foreign Result and import it as a read-only disk "
+        "reference without lifecycle authority"
+    )
+
+    filepath: StringProperty(
+        name="External Result Directory", subtype="DIR_PATH"
+    )
+    target_scene_pointer: StringProperty(options={"HIDDEN"})
+    confirmed: BoolProperty(default=False, options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        self.target_scene_pointer = str(context.scene.as_pointer())
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        try:
+            target = _scene_from_pointer(self.target_scene_pointer)
+            document = validate_result(self.filepath)
+            current = normalized_blend_path(bpy.data.filepath)
+            original = normalized_blend_path(
+                document.manifest["target_scene"]["blend_path"]
+            )
+            expected_parent = project_result_root(original) / "results"
+            selected = Path(self.filepath).resolve()
+            if (
+                str(current).casefold() == str(original).casefold()
+                and str(selected.parent).casefold()
+                == str(expected_parent).casefold()
+            ):
+                raise ResultImportError(
+                    "This Result belongs to the current project; use Import"
+                )
+            if not self.confirmed:
+                self.confirmed = True
+                return context.window_manager.invoke_props_dialog(
+                    self, width=520
+                )
+            outcome = import_result(
+                document.ready.directory,
+                target,
+                context=context if target is context.scene else None,
+            )
+        except (
+            ImportCapacityError,
+            ResultImportCancelled,
+            ResultImportError,
+            OSError,
+            MemoryError,
+        ) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"},
+            outcome.message + "; external Result remains read-only on disk",
+        )
+        return {"FINISHED"}
+
+    def draw(self, _context):
+        self.layout.label(
+            text="Import this completely validated external Result?",
+            icon="QUESTION",
+        )
+        self.layout.label(text=str(self.filepath))
+        self.layout.label(
+            text="Its disk content remains read-only and is never deleted"
+        )
+
+
+class LINGBOTMAP_OT_relink_result_reference(bpy.types.Operator):
+    bl_idname = "lingbot_map.relink_result_reference"
+    bl_label = "Relink Result Reference"
+    bl_description = (
+        "Accept only a completely valid bundle with the exact recorded Result "
+        "ID and manifest checksum"
+    )
+
+    collection_pointer: StringProperty(options={"HIDDEN"})
+    filepath: StringProperty(name="Result Directory", subtype="DIR_PATH")
+
+    def invoke(self, context, _event):
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        try:
+            collection = _collection_from_pointer(self.collection_pointer)
+            message = relink_result_reference(
+                collection,
+                context.scene,
+                self.filepath,
+                bpy.data.filepath,
+            )
+        except (ResultImportError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_detach_result_copy(bpy.types.Operator):
+    bl_idname = "lingbot_map.detach_result_copy"
+    bl_label = "Detach Copy"
+    bl_description = (
+        "Remove Extension identity and lifecycle authority without deleting "
+        "or unlinking Blender data"
+    )
+
+    collection_pointer: StringProperty(options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_confirm(self, _event)
+
+    def execute(self, _context):
+        try:
+            collection = _collection_from_pointer(self.collection_pointer)
+            detach_collection_copy(collection)
+        except ResultImportError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Collection detached; all Blender data preserved")
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_resolve_duplicate_imports(bpy.types.Operator):
+    bl_idname = "lingbot_map.resolve_duplicate_imports"
+    bl_label = "Resolve Duplicate Imports"
+    bl_description = (
+        "Keep this explicitly selected managed Collection and detach every "
+        "other duplicate non-destructively"
+    )
+
+    result_id: StringProperty(options={"HIDDEN"})
+    keeper_pointer: StringProperty(options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_confirm(self, _event)
+
+    def execute(self, context):
+        try:
+            keeper = _collection_from_pointer(self.keeper_pointer)
+            detached = resolve_duplicate_imports(
+                context.scene, self.result_id, keeper
+            )
+        except ResultImportError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"}, f"Kept one managed instance; detached {detached} copies"
+        )
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_remove_result_version(bpy.types.Operator):
+    bl_idname = "lingbot_map.remove_result_version"
+    bl_label = "Remove Version"
+    bl_description = (
+        "Remove only uniquely owned Blender datablocks; the disk Result remains"
+    )
+
+    collection_pointer: StringProperty(options={"HIDDEN"})
+    inventory_name: StringProperty(options={"HIDDEN"})
+    inventory_objects: StringProperty(options={"HIDDEN"})
+    inventory_points: StringProperty(options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        try:
+            collection = _collection_from_pointer(self.collection_pointer)
+            inventory = removal_inventory(collection, context.scene)
+        except ResultImportError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.inventory_name = inventory.collection_name
+        self.inventory_objects = str(inventory.object_count)
+        self.inventory_points = str(inventory.point_count)
+        return context.window_manager.invoke_props_dialog(self, width=520)
+
+    def draw(self, _context):
+        self.layout.label(
+            text="Managed content may contain undetected user edits",
+            icon="ERROR",
+        )
+        self.layout.label(text=f"Collection: {self.inventory_name}")
+        self.layout.label(text=f"Objects: {self.inventory_objects}")
+        self.layout.label(text=f"Points: {self.inventory_points}")
+        self.layout.label(
+            text="Only uniquely owned Blender datablocks are deleted; disk data stays"
+        )
+
+    def execute(self, context):
+        try:
+            collection = _collection_from_pointer(self.collection_pointer)
+            inventory = remove_managed_version(
+                collection, context.scene
+            )
+        except ResultImportError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"},
+            f"Removed {inventory.collection_name}; shared data was preserved",
+        )
+        return {"FINISHED"}
+
+
 def _imported_reconstruction_collections(scene):
     found = []
     pending = list(scene.collection.children)
@@ -558,7 +909,7 @@ def _imported_reconstruction_collections(scene):
         if (
             collection.get("lingbot_map_kind")
             == "reconstruction_collection"
-            and collection.get("lingbot_map_owner_schema") == "1.0.0"
+            or collection.get("lingbot_map_result_id") is not None
         ):
             found.append(collection)
     return tuple(found)
@@ -574,6 +925,9 @@ def _imported_collection(scene, result_id):
         raise ResultImportError(
             "Scene does not contain exactly one owned Collection for this Result"
         )
+    inspection = inspect_collection_ownership(matches[0], scene)
+    if inspection.status != "managed":
+        raise ResultImportError(inspection.message)
     return matches[0]
 
 
@@ -832,6 +1186,25 @@ class LINGBOTMAP_PT_reconstruct(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
     def draw(self, context):
         decision = get_host_decision()
         layout = self.layout
+        data = getattr(bpy, "data", None)
+        for duplicate_uuid, scenes in duplicate_scene_uuid_groups(
+            tuple(getattr(data, "scenes", ()))
+        ).items():
+            box = layout.box()
+            box.label(
+                text=f"Duplicate Scene ID: {duplicate_uuid}",
+                icon="ERROR",
+            )
+            box.label(
+                text="Choose the exact keeper; every other Scene gets a new ID"
+            )
+            for scene in scenes:
+                repair = box.operator(
+                    LINGBOTMAP_OT_repair_scene_uuid.bl_idname,
+                    text=f"Keep {scene.name}",
+                )
+                repair.duplicate_uuid = duplicate_uuid
+                repair.keeper_pointer = str(scene.as_pointer())
         layout.label(text="Configure one Capture Source and Reconstruction Profile")
         layout.prop(context.scene, CAPTURE_SOURCE_PROPERTY, text="Capture Source")
         layout.operator(LINGBOTMAP_OT_select_capture_source.bl_idname)
@@ -884,14 +1257,21 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
     bl_order = 3
 
     def draw(self, context):
+        external = self.layout.operator(
+            LINGBOTMAP_OT_import_external_result.bl_idname,
+            text="Import External Result",
+            icon="IMPORT",
+        )
+        external.target_scene_pointer = str(context.scene.as_pointer())
         blend_path = getattr(bpy.data, "filepath", "")
         scene_uuid = context.scene.get("lingbot_map_scene_uuid") if blend_path else None
         results = discover_ready_results(blend_path, scene_uuid=scene_uuid) if blend_path else ()
         imported = _imported_reconstruction_collections(context.scene)
-        imported_by_id = {
-            collection.get("lingbot_map_result_id"): collection
-            for collection in imported
-        }
+        imported_by_id = {}
+        for collection in imported:
+            imported_by_id.setdefault(
+                collection.get("lingbot_map_result_id"), []
+            ).append(collection)
         if not results and not imported:
             self.layout.label(text="No Reconstruction Results discovered")
             return
@@ -932,23 +1312,178 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                         ),
                         icon="ERROR",
                     )
-            action = box.operator(
-                LINGBOTMAP_OT_import_result.bl_idname,
-                text="Import",
-                icon="IMPORT",
-            )
-            action.result_directory = str(result.directory)
-            collection = imported_by_id.get(result.result_id)
-            if collection is not None:
+            claims = tuple(imported_by_id.get(result.result_id, ()))
+            if not claims:
+                action = box.operator(
+                    LINGBOTMAP_OT_import_result.bl_idname,
+                    text="Import",
+                    icon="IMPORT",
+                )
+                action.result_directory = str(result.directory)
+                self._draw_import_into_actions(
+                    box, context.scene, result.directory
+                )
+            elif len(claims) > 1:
+                box.label(
+                    text="Duplicate Imported Identity",
+                    icon="ERROR",
+                )
+                box.label(
+                    text="Choose the exact managed keeper; copies are detached"
+                )
+                for collection in claims:
+                    inspection = inspect_collection_ownership(
+                        collection, context.scene
+                    )
+                    if inspection.status == "managed":
+                        keep = box.operator(
+                            LINGBOTMAP_OT_resolve_duplicate_imports.bl_idname,
+                            text=f"Keep {collection.name}",
+                        )
+                        keep.result_id = result.result_id
+                        keep.keeper_pointer = str(collection.as_pointer())
+                    else:
+                        box.label(
+                            text=f"{collection.name}: {inspection.message}",
+                            icon="ERROR",
+                        )
+            for collection in claims:
                 drawn_imported.add(result.result_id)
-                self._draw_source_view(box, collection)
+                self._draw_managed_collection(
+                    box,
+                    context,
+                    collection,
+                    duplicate_count=len(claims),
+                )
         for collection in imported:
             result_id = collection.get("lingbot_map_result_id")
             if result_id in drawn_imported:
                 continue
             box = self.layout.box()
-            box.label(text=f"Imported {result_id}", icon="CHECKMARK")
-            self._draw_source_view(box, collection)
+            claims = tuple(imported_by_id.get(result_id, ()))
+            box.label(text=f"Imported {result_id}", icon="INFO")
+            if len(claims) > 1:
+                box.label(
+                    text="Duplicate Imported Identity",
+                    icon="ERROR",
+                )
+                for candidate in claims:
+                    inspection = inspect_collection_ownership(
+                        candidate, context.scene
+                    )
+                    if inspection.status == "managed":
+                        keep = box.operator(
+                            LINGBOTMAP_OT_resolve_duplicate_imports.bl_idname,
+                            text=f"Keep {candidate.name}",
+                        )
+                        keep.result_id = str(result_id)
+                        keep.keeper_pointer = str(candidate.as_pointer())
+            self._draw_managed_collection(
+                box,
+                context,
+                collection,
+                duplicate_count=len(claims),
+            )
+
+    @staticmethod
+    def _draw_import_into_actions(box, current_scene, result_directory):
+        scene_uuids = []
+        for scene in bpy.data.scenes:
+            try:
+                scene_uuids.append(
+                    str(
+                        uuid.UUID(
+                            str(
+                                scene.get(
+                                    "lingbot_map_scene_uuid", ""
+                                )
+                            )
+                        )
+                    )
+                )
+            except ValueError:
+                scene_uuids.append("")
+        for scene in bpy.data.scenes:
+            try:
+                uuid_value = str(
+                    uuid.UUID(
+                        str(
+                            scene.get(
+                                "lingbot_map_scene_uuid", ""
+                            )
+                        )
+                    )
+                )
+            except ValueError:
+                uuid_value = ""
+            if (
+                scene is current_scene
+                or not uuid_value
+                or scene_uuids.count(uuid_value) != 1
+                or bool(
+                    scene.get(
+                        SCENE_UUID_SAVE_REQUIRED_PROPERTY, False
+                    )
+                )
+            ):
+                continue
+            action = box.operator(
+                LINGBOTMAP_OT_import_result_into.bl_idname,
+                text=f"Import Into {scene.name}",
+            )
+            action.result_directory = str(result_directory)
+            action.target_scene_pointer = str(scene.as_pointer())
+
+    @classmethod
+    def _draw_managed_collection(
+        cls, box, context, collection, *, duplicate_count
+    ):
+        inspection = inspect_collection_ownership(
+            collection, context.scene
+        )
+        icon = "CHECKMARK" if inspection.status == "managed" else "ERROR"
+        box.label(
+            text=f"{collection.name}: {inspection.message}",
+            icon=icon,
+        )
+        authority = effective_disk_authority(
+            collection, bpy.data.filepath
+        )
+        box.label(text=f"Disk authority: {authority}")
+        status, resolved = result_reference_status(
+            collection, bpy.data.filepath
+        )
+        box.label(
+            text=f"Result reference: {status}",
+            icon="CHECKMARK" if status == "available" else "ERROR",
+        )
+        if resolved:
+            box.label(text=resolved)
+        if status != "available" and inspection.status == "managed":
+            relink = box.operator(
+                LINGBOTMAP_OT_relink_result_reference.bl_idname,
+                text="Relink Result Reference",
+            )
+            relink.collection_pointer = str(collection.as_pointer())
+        detach = box.operator(
+            LINGBOTMAP_OT_detach_result_copy.bl_idname,
+            text="Detach Copy",
+        )
+        detach.collection_pointer = str(collection.as_pointer())
+        if inspection.status != "managed":
+            box.label(
+                text="Destructive actions disabled until ownership is consistent",
+                icon="ERROR",
+            )
+            return
+        if duplicate_count == 1:
+            remove = box.operator(
+                LINGBOTMAP_OT_remove_result_version.bl_idname,
+                text="Remove Version",
+                icon="TRASH",
+            )
+            remove.collection_pointer = str(collection.as_pointer())
+        cls._draw_source_view(box, collection)
 
     @staticmethod
     def _draw_source_view(box, collection):
@@ -1034,6 +1569,13 @@ CLASSES = (
     LINGBOTMAP_OT_run_reconstruction_job,
     LINGBOTMAP_OT_cancel_active_job,
     LINGBOTMAP_OT_import_result,
+    LINGBOTMAP_OT_repair_scene_uuid,
+    LINGBOTMAP_OT_import_result_into,
+    LINGBOTMAP_OT_import_external_result,
+    LINGBOTMAP_OT_relink_result_reference,
+    LINGBOTMAP_OT_detach_result_copy,
+    LINGBOTMAP_OT_resolve_duplicate_imports,
+    LINGBOTMAP_OT_remove_result_version,
     LINGBOTMAP_OT_use_reconstruction_camera,
     LINGBOTMAP_OT_set_resolution_to_source,
     LINGBOTMAP_OT_relink_source_background,

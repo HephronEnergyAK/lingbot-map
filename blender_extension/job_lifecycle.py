@@ -29,6 +29,7 @@ from .runtime_setup import RuntimeSetupError, process_identity, sha256_file
 
 
 SCENE_UUID_PROPERTY = "lingbot_map_scene_uuid"
+SCENE_UUID_SAVE_REQUIRED_PROPERTY = "lingbot_map_scene_uuid_save_required"
 CAPTURE_SOURCE_PROPERTY = "lingbot_map_capture_source"
 PROFILE_PROPERTY = "lingbot_map_profile"
 CAMERA_ITERATIONS_PROPERTY = "lingbot_map_camera_iterations"
@@ -138,22 +139,99 @@ def project_result_root(blend_path: str | Path) -> Path:
     return path.with_name(f"{path.stem}.lingbot-map")
 
 
-def ensure_unique_scene_uuid(scene: Any, scenes: list[Any] | tuple[Any, ...]) -> str:
+def ensure_unique_scene_uuid(
+    scene: Any,
+    scenes: list[Any] | tuple[Any, ...],
+) -> str:
     value = str(scene.get(SCENE_UUID_PROPERTY, "")).strip()
     if not value:
         value = str(uuid.uuid4())
         scene[SCENE_UUID_PROPERTY] = value
+        scene[SCENE_UUID_SAVE_REQUIRED_PROPERTY] = True
         raise JobLifecycleError(
             "A Scene UUID was assigned. Save the .blend, then launch the Job again."
+        )
+    if bool(scene.get(SCENE_UUID_SAVE_REQUIRED_PROPERTY, False)):
+        raise JobLifecycleError(
+            "Scene identity changed. Save the .blend before launch or automatic import."
         )
     try:
         canonical = str(uuid.UUID(value))
     except ValueError as exc:
         raise JobLifecycleError("Target Scene has an invalid LingBot Map UUID") from exc
-    matches = sum(str(item.get(SCENE_UUID_PROPERTY, "")).strip() == value for item in scenes)
+    matches = 0
+    for item in scenes:
+        try:
+            candidate = str(
+                uuid.UUID(
+                    str(item.get(SCENE_UUID_PROPERTY, "")).strip()
+                )
+            )
+        except ValueError:
+            continue
+        if candidate == canonical:
+            matches += 1
     if matches != 1:
         raise JobLifecycleError("Target Scene UUID is duplicated; repair it before launch")
     return canonical
+
+
+def duplicate_scene_uuid_groups(
+    scenes: list[Any] | tuple[Any, ...],
+) -> dict[str, tuple[Any, ...]]:
+    groups: dict[str, list[Any]] = {}
+    for scene in scenes:
+        raw = str(scene.get(SCENE_UUID_PROPERTY, "")).strip()
+        if not raw:
+            continue
+        try:
+            canonical = str(uuid.UUID(raw))
+        except ValueError:
+            continue
+        groups.setdefault(canonical, []).append(scene)
+    return {
+        identifier: tuple(items)
+        for identifier, items in groups.items()
+        if len(items) > 1
+    }
+
+
+def repair_duplicate_scene_uuids(
+    scenes: list[Any] | tuple[Any, ...],
+    duplicate_uuid: str,
+    keeper: Any,
+) -> dict[str, str]:
+    """Keep one explicitly selected identity and re-key every other duplicate."""
+
+    try:
+        canonical = str(uuid.UUID(str(duplicate_uuid)))
+    except ValueError as exc:
+        raise JobLifecycleError("Duplicate Scene UUID is invalid") from exc
+    matches = []
+    for scene in scenes:
+        try:
+            candidate = str(
+                uuid.UUID(
+                    str(scene.get(SCENE_UUID_PROPERTY, "")).strip()
+                )
+            )
+        except ValueError:
+            continue
+        if candidate == canonical:
+            matches.append(scene)
+    matches = tuple(matches)
+    if len(matches) < 2 or sum(scene is keeper for scene in matches) != 1:
+        raise JobLifecycleError(
+            "Choose exactly one Scene from the duplicate identity group as keeper"
+        )
+    repaired: dict[str, str] = {}
+    for scene in matches:
+        if scene is not keeper:
+            replacement = str(uuid.uuid4())
+            scene[SCENE_UUID_PROPERTY] = replacement
+            repaired[str(getattr(scene, "name", ""))] = replacement
+        scene[SCENE_UUID_SAVE_REQUIRED_PROPERTY] = True
+    return repaired
 
 
 def _require_plain(path: Path, *, label: str) -> None:

@@ -44,7 +44,9 @@ from blender_extension.job_lifecycle import (
     capture_source_draft_path,
     ensure_project_layout,
     ensure_unique_scene_uuid,
+    duplicate_scene_uuid_groups,
     project_result_root,
+    repair_duplicate_scene_uuids,
     scene_relative_capture_path,
     validate_control,
     validate_status,
@@ -125,11 +127,41 @@ class ProjectBindingTests(unittest.TestCase):
         scene = Scene()
         with self.assertRaisesRegex(JobLifecycleError, "assigned"):
             ensure_unique_scene_uuid(scene, (scene,))
+        del scene["lingbot_map_scene_uuid_save_required"]
         value = ensure_unique_scene_uuid(scene, (scene,))
         duplicate = Scene(scene)
+        duplicate["lingbot_map_scene_uuid"] = value.upper()
         with self.assertRaisesRegex(JobLifecycleError, "duplicated"):
-            ensure_unique_scene_uuid(scene, (scene, duplicate))
+            ensure_unique_scene_uuid(
+                scene,
+                (scene, duplicate),
+            )
         self.assertEqual(value, scene["lingbot_map_scene_uuid"])
+
+        groups = duplicate_scene_uuid_groups((scene, duplicate))
+        self.assertEqual(tuple(groups), (value,))
+        repaired = repair_duplicate_scene_uuids(
+            (scene, duplicate), value, scene
+        )
+        self.assertEqual(len(repaired), 1)
+        self.assertEqual(scene["lingbot_map_scene_uuid"], value)
+        self.assertNotEqual(
+            duplicate["lingbot_map_scene_uuid"], value
+        )
+        with self.assertRaisesRegex(JobLifecycleError, "Save"):
+            ensure_unique_scene_uuid(
+                scene,
+                (scene, duplicate),
+            )
+        del scene["lingbot_map_scene_uuid_save_required"]
+        del duplicate["lingbot_map_scene_uuid_save_required"]
+        self.assertEqual(
+            ensure_unique_scene_uuid(
+                scene,
+                (scene, duplicate),
+            ),
+            value,
+        )
 
     def test_project_layout_is_bounded_and_sibling_to_blend(self):
         with tempfile.TemporaryDirectory() as temporary:
