@@ -53,7 +53,16 @@ from .job_lifecycle import (
     start_preflight_job,
     start_reconstruction_job,
 )
-from .results import discover_ready_results
+from .results import read_ready_result
+from .project_lifecycle import (
+    InventorySnapshot,
+    LifecyclePlan,
+    PartialDeletionError,
+    PermanentDeletionSession,
+    ProjectInventory,
+    ProjectLifecycle,
+    ProjectLifecycleError,
+)
 from .result_import import (
     ImportCapacityError,
     ResultImportCancelled,
@@ -83,6 +92,159 @@ PROFILE_DEFAULTS = {
     "Balanced": (4, 50.0, 99.5, 5_000_000),
     "High": (4, 30.0, 99.5, 10_000_000),
 }
+
+_project_inventory: ProjectInventory | None = None
+_project_inventory_key = ""
+_project_inventory_pages = {
+    "jobs": 0,
+    "results": 0,
+    "diagnostics": 0,
+    "trash": 0,
+}
+_pending_lifecycle_plans: dict[str, tuple[str, ProjectLifecycle, LifecyclePlan]] = {}
+_permanent_delete_status = ""
+_project_inventory_error = ""
+
+
+def _project_key(blend_path: str) -> str:
+    return str(normalized_blend_path(blend_path)).casefold()
+
+
+def clear_project_inventory() -> None:
+    global _project_inventory, _project_inventory_key
+    global _permanent_delete_status
+    global _project_inventory_error
+    if _project_inventory is not None:
+        _project_inventory.close()
+    _project_inventory = None
+    _project_inventory_key = ""
+    _project_inventory_pages.update(
+        {"jobs": 0, "results": 0, "diagnostics": 0, "trash": 0}
+    )
+    _pending_lifecycle_plans.clear()
+    _permanent_delete_status = ""
+    _project_inventory_error = ""
+
+
+def _inventory_for(blend_path: str) -> ProjectInventory:
+    global _project_inventory, _project_inventory_key
+    key = _project_key(blend_path)
+    if _project_inventory is None or key != _project_inventory_key:
+        clear_project_inventory()
+        _project_inventory = ProjectInventory(blend_path)
+        _project_inventory_key = key
+    return _project_inventory
+
+
+def project_inventory_snapshot(
+    blend_path: str,
+) -> InventorySnapshot | None:
+    if not blend_path:
+        return None
+    return _inventory_for(blend_path).snapshot()
+
+
+def advance_project_inventory(blend_path: str) -> InventorySnapshot | None:
+    global _project_inventory_error
+    if not blend_path:
+        clear_project_inventory()
+        return None
+    inventory = _inventory_for(blend_path)
+    try:
+        return inventory.advance()
+    except (ProjectLifecycleError, OSError) as exc:
+        _project_inventory_error = str(exc)
+        inventory.close()
+        return inventory.snapshot()
+
+
+def refresh_project_inventory(blend_path: str) -> None:
+    clear_project_inventory()
+    if blend_path:
+        _inventory_for(blend_path)
+
+
+def _inventory_rows(
+    snapshot: InventorySnapshot, category: str
+) -> tuple:
+    page = _project_inventory_pages.get(category, 0)
+    return snapshot.page(category, page)
+
+
+def _draw_inventory_page_controls(
+    layout, category: str, total: int, label: str
+) -> None:
+    page = _project_inventory_pages.get(category, 0)
+    if page > 0:
+        previous = layout.operator(
+            LINGBOTMAP_OT_load_more_project_items.bl_idname,
+            text=f"Previous {label} Page",
+        )
+        previous.category = category
+        previous.direction = "previous"
+    if (page + 1) * 200 < total:
+        following = layout.operator(
+            LINGBOTMAP_OT_load_more_project_items.bl_idname,
+            text=f"Next {label} Page",
+        )
+        following.category = category
+        following.direction = "next"
+
+
+def ready_results_for_completed_job(
+    blend_path: str, job_id: str
+) -> tuple | None:
+    """Return exact Ready Results only after bounded inventory is complete."""
+
+    snapshot = project_inventory_snapshot(blend_path)
+    if snapshot is None or not snapshot.complete:
+        return None
+    if snapshot.jobs_abnormal or _project_inventory_error:
+        return ()
+    root = project_result_root(blend_path) / "results"
+    ready = []
+    for item in snapshot.items:
+        if (
+            item.category != "results"
+            or item.status != "recognized"
+            or item.job_id != job_id
+        ):
+            continue
+        try:
+            ready.append(read_ready_result(root / item.name))
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return tuple(ready)
+
+
+def _store_lifecycle_plan(
+    blend_path: str, lifecycle: ProjectLifecycle, plan: LifecyclePlan
+) -> str:
+    if len(_pending_lifecycle_plans) >= 64:
+        _pending_lifecycle_plans.pop(next(iter(_pending_lifecycle_plans)))
+    key = uuid.uuid4().hex
+    _pending_lifecycle_plans[key] = (
+        _project_key(blend_path),
+        lifecycle,
+        plan,
+    )
+    return key
+
+
+def _consume_lifecycle_plan(
+    key: str, blend_path: str
+) -> tuple[ProjectLifecycle, LifecyclePlan]:
+    try:
+        expected, lifecycle, plan = _pending_lifecycle_plans.pop(key)
+    except KeyError as exc:
+        raise ProjectLifecycleError(
+            "Lifecycle confirmation expired; inspect and confirm again"
+        ) from exc
+    if expected != _project_key(blend_path):
+        raise ProjectLifecycleError(
+            "The Blender file changed after confirmation"
+        )
+    return lifecycle, plan
 
 
 def _capability_settings_sha256(name: str) -> str:
@@ -1069,6 +1231,449 @@ class LINGBOTMAP_OT_toggle_model_coverage(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _new_lifecycle_plan(action: str, names: tuple[str, ...]):
+    blend_path = str(getattr(bpy.data, "filepath", ""))
+    if not blend_path:
+        raise ProjectLifecycleError(
+            "Save the Blender file before managing Project content"
+        )
+    lifecycle = ProjectLifecycle(blend_path)
+    plan = lifecycle.plan(action, names)
+    key = _store_lifecycle_plan(blend_path, lifecycle, plan)
+    return blend_path, plan, key
+
+
+def _execute_lifecycle_plan(key: str):
+    blend_path = str(getattr(bpy.data, "filepath", ""))
+    lifecycle, plan = _consume_lifecycle_plan(key, blend_path)
+    outcome = lifecycle.execute(plan)
+    refresh_project_inventory(blend_path)
+    return outcome
+
+
+class LINGBOTMAP_OT_refresh_project_inventory(bpy.types.Operator):
+    bl_idname = "lingbot_map.refresh_project_inventory"
+    bl_label = "Refresh Project Inventory"
+    bl_description = (
+        "Restart bounded direct-child discovery without changing disk content"
+    )
+
+    def execute(self, _context):
+        try:
+            refresh_project_inventory(str(bpy.data.filepath))
+        except (ProjectLifecycleError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_load_more_project_items(bpy.types.Operator):
+    bl_idname = "lingbot_map.load_more_project_items"
+    bl_label = "Load Next Project Page"
+    bl_description = "Display the next bounded page of at most 200 items"
+
+    category: StringProperty(options={"HIDDEN"})
+    direction: StringProperty(options={"HIDDEN"}, default="next")
+
+    def execute(self, _context):
+        if self.category not in _project_inventory_pages:
+            self.report({"ERROR"}, "Unknown Project inventory category")
+            return {"CANCELLED"}
+        if self.direction == "previous":
+            _project_inventory_pages[self.category] = max(
+                0, _project_inventory_pages[self.category] - 1
+            )
+        elif self.direction == "next":
+            _project_inventory_pages[self.category] += 1
+        else:
+            self.report({"ERROR"}, "Unknown Project page direction")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_trash_result(bpy.types.Operator):
+    bl_idname = "lingbot_map.trash_result"
+    bl_label = "Move Result to Project Trash"
+    bl_description = (
+        "Completely validate this owned Result, then atomically move it to "
+        "this Project's recoverable Trash"
+    )
+
+    result_name: StringProperty(options={"HIDDEN"})
+    plan_key: StringProperty(options={"HIDDEN"})
+    result_id: StringProperty(options={"HIDDEN"})
+    item_count: StringProperty(options={"HIDDEN"})
+    file_count: StringProperty(options={"HIDDEN"})
+    byte_count: StringProperty(options={"HIDDEN"})
+    collection_names: StringProperty(options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        try:
+            _blend, plan, self.plan_key = _new_lifecycle_plan(
+                "trash_result", (self.result_name,)
+            )
+        except (ProjectLifecycleError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.result_id = str(plan.result_id or "")
+        self.item_count = str(plan.item_count)
+        self.file_count = str(plan.file_count)
+        self.byte_count = str(plan.byte_count)
+        names = [
+            collection.name
+            for collection in _imported_reconstruction_collections(
+                context.scene
+            )
+            if collection.get("lingbot_map_result_id") == plan.result_id
+        ]
+        self.collection_names = ", ".join(names) or "none"
+        return context.window_manager.invoke_props_dialog(self, width=560)
+
+    def draw(self, _context):
+        self.layout.label(
+            text="Atomically move this owned Result to Project Trash?",
+            icon="QUESTION",
+        )
+        self.layout.label(text=f"Result: {self.result_id}")
+        self.layout.label(
+            text=(
+                f"Items: {self.item_count} · files: {self.file_count} · "
+                f"bytes: {self.byte_count}"
+            )
+        )
+        self.layout.label(
+            text=f"Current Blender Collections: {self.collection_names}"
+        )
+        self.layout.label(
+            text="Collections remain usable; their disk reference becomes unavailable"
+        )
+        self.layout.label(
+            text="References in other .blend files cannot be discovered",
+            icon="INFO",
+        )
+
+    def execute(self, _context):
+        try:
+            outcome = _execute_lifecycle_plan(self.plan_key)
+        except (ProjectLifecycleError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"},
+            f"Moved {outcome.item_count} Result to Project Trash",
+        )
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_trash_dense(bpy.types.Operator):
+    bl_idname = "lingbot_map.trash_dense"
+    bl_label = "Remove Dense Predictions"
+    bl_description = (
+        "Completely validate retained Dense Predictions, then atomically "
+        "move only that component to Project Trash"
+    )
+
+    result_name: StringProperty(options={"HIDDEN"})
+    plan_key: StringProperty(options={"HIDDEN"})
+    result_id: StringProperty(options={"HIDDEN"})
+    chunk_count: StringProperty(options={"HIDDEN"})
+    file_count: StringProperty(options={"HIDDEN"})
+    byte_count: StringProperty(options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        try:
+            _blend, plan, self.plan_key = _new_lifecycle_plan(
+                "trash_dense", (self.result_name,)
+            )
+        except (ProjectLifecycleError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.result_id = str(plan.result_id or "")
+        self.chunk_count = str(plan.chunk_count)
+        self.file_count = str(plan.file_count)
+        self.byte_count = str(plan.byte_count)
+        return context.window_manager.invoke_props_dialog(self, width=520)
+
+    def draw(self, _context):
+        self.layout.label(
+            text="Move only Dense Predictions to Project Trash?",
+            icon="QUESTION",
+        )
+        self.layout.label(text=f"Result: {self.result_id}")
+        self.layout.label(
+            text=(
+                f"Chunks: {self.chunk_count} · files: {self.file_count} · "
+                f"bytes: {self.byte_count}"
+            )
+        )
+        self.layout.label(text="The core Result and Blender content remain usable")
+
+    def execute(self, _context):
+        try:
+            _execute_lifecycle_plan(self.plan_key)
+        except (ProjectLifecycleError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Dense Predictions moved to Project Trash")
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_trash_diagnostic(bpy.types.Operator):
+    bl_idname = "lingbot_map.trash_diagnostic"
+    bl_label = "Move Diagnostic to Project Trash"
+    bl_description = (
+        "Explicitly move this terminal Diagnostic to recoverable Project Trash"
+    )
+
+    diagnostic_name: StringProperty(options={"HIDDEN"})
+    diagnostic_names_json: StringProperty(options={"HIDDEN"})
+    plan_key: StringProperty(options={"HIDDEN"})
+    item_count: StringProperty(options={"HIDDEN"})
+    file_count: StringProperty(options={"HIDDEN"})
+    byte_count: StringProperty(options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        try:
+            if self.diagnostic_names_json:
+                raw_names = json.loads(self.diagnostic_names_json)
+                if not isinstance(raw_names, list):
+                    raise ProjectLifecycleError(
+                        "Diagnostic selection is invalid"
+                    )
+                names = tuple(raw_names)
+            else:
+                names = (self.diagnostic_name,)
+            if (
+                not 1 <= len(names) <= 200
+                or not all(isinstance(name, str) for name in names)
+            ):
+                raise ProjectLifecycleError(
+                    "Diagnostic selection is invalid"
+                )
+            _blend, plan, self.plan_key = _new_lifecycle_plan(
+                "trash_diagnostics", names
+            )
+        except (
+            json.JSONDecodeError,
+            ProjectLifecycleError,
+            OSError,
+        ) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.item_count = str(plan.item_count)
+        self.file_count = str(plan.file_count)
+        self.byte_count = str(plan.byte_count)
+        return context.window_manager.invoke_props_dialog(self, width=520)
+
+    def draw(self, _context):
+        self.layout.label(
+            text="Diagnostics are retained unless you explicitly confirm",
+            icon="QUESTION",
+        )
+        self.layout.label(text=f"Selected items: {self.item_count}")
+        self.layout.label(
+            text=f"Files: {self.file_count} · bytes: {self.byte_count}"
+        )
+
+    def execute(self, _context):
+        try:
+            outcome = _execute_lifecycle_plan(self.plan_key)
+        except (ProjectLifecycleError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"},
+            f"Moved {outcome.item_count} Diagnostics to Project Trash",
+        )
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_restore_trash(bpy.types.Operator):
+    bl_idname = "lingbot_map.restore_trash"
+    bl_label = "Restore from Project Trash"
+    bl_description = (
+        "Restore to the exact owning destination only when identity is unique "
+        "and nothing would be overwritten"
+    )
+
+    trash_name: StringProperty(options={"HIDDEN"})
+    plan_key: StringProperty(options={"HIDDEN"})
+    destination: StringProperty(options={"HIDDEN"})
+    file_count: StringProperty(options={"HIDDEN"})
+    byte_count: StringProperty(options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        try:
+            _blend, plan, self.plan_key = _new_lifecycle_plan(
+                "restore", (self.trash_name,)
+            )
+        except (ProjectLifecycleError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.destination = str(plan.destinations[0])
+        self.file_count = str(plan.file_count)
+        self.byte_count = str(plan.byte_count)
+        return context.window_manager.invoke_props_dialog(self, width=560)
+
+    def draw(self, _context):
+        self.layout.label(
+            text="Restore this exact validated Trash item?",
+            icon="QUESTION",
+        )
+        self.layout.label(text=f"Files: {self.file_count} · bytes: {self.byte_count}")
+        self.layout.label(text=f"Destination: {self.destination}")
+        self.layout.label(text="Existing destinations are never overwritten")
+
+    def execute(self, _context):
+        try:
+            _execute_lifecycle_plan(self.plan_key)
+        except (ProjectLifecycleError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Project Trash item restored")
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_delete_trash(bpy.types.Operator):
+    bl_idname = "lingbot_map.delete_trash"
+    bl_label = "Permanently Delete Trash Item"
+    bl_description = (
+        "Permanently delete one fully inspected direct Project Trash child; "
+        "press Esc between files to stop"
+    )
+
+    trash_name: StringProperty(options={"HIDDEN"})
+    plan_key: StringProperty(options={"HIDDEN"})
+    confirmation: StringProperty(name="Type DELETE", default="")
+    item_count: StringProperty(options={"HIDDEN"})
+    file_count: StringProperty(options={"HIDDEN"})
+    byte_count: StringProperty(options={"HIDDEN"})
+
+    _timer = None
+    _session: PermanentDeletionSession | None = None
+
+    def invoke(self, context, _event):
+        try:
+            _blend, plan, self.plan_key = _new_lifecycle_plan(
+                "delete", (self.trash_name,)
+            )
+        except (ProjectLifecycleError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.item_count = str(plan.item_count)
+        self.file_count = str(plan.file_count)
+        self.byte_count = str(plan.byte_count)
+        self.confirmation = ""
+        return context.window_manager.invoke_props_dialog(self, width=560)
+
+    def draw(self, _context):
+        self.layout.label(
+            text="Permanent deletion cannot be undone",
+            icon="ERROR",
+        )
+        self.layout.label(
+            text=(
+                f"Items: {self.item_count} · files: {self.file_count} · "
+                f"bytes: {self.byte_count}"
+            )
+        )
+        self.layout.prop(self, "confirmation")
+        self.layout.label(text="After starting, press Esc between files to cancel")
+
+    def _remove_timer(self, context):
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+
+    def execute(self, context):
+        global _permanent_delete_status
+        try:
+            lifecycle, plan = _consume_lifecycle_plan(
+                self.plan_key, str(bpy.data.filepath)
+            )
+            self._session = lifecycle.begin_delete(
+                plan, confirmation=self.confirmation
+            )
+        except (ProjectLifecycleError, OSError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        _permanent_delete_status = (
+            f"Deleting {plan.file_count} inspected file(s); Esc cancels "
+            "between files"
+        )
+        self._timer = context.window_manager.event_timer_add(
+            0.01, window=context.window
+        )
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        global _permanent_delete_status
+        if event.type == "ESC":
+            partial = False
+            try:
+                self._session.cancel()
+            except PartialDeletionError as exc:
+                partial = True
+                self.report({"WARNING"}, str(exc))
+            except ProjectLifecycleError as exc:
+                self.report({"INFO"}, str(exc))
+            self._remove_timer(context)
+            refresh_project_inventory(str(bpy.data.filepath))
+            _permanent_delete_status = (
+                "Permanent deletion cancelled; inspect partial_delete items"
+                if partial
+                else "Permanent deletion cancelled before changing Trash"
+            )
+            self._session = None
+            return {"CANCELLED"}
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        try:
+            outcome = self._session.step()
+        except PartialDeletionError as exc:
+            self._remove_timer(context)
+            refresh_project_inventory(str(bpy.data.filepath))
+            _permanent_delete_status = str(exc)
+            self._session = None
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except (ProjectLifecycleError, OSError) as exc:
+            self._remove_timer(context)
+            refresh_project_inventory(str(bpy.data.filepath))
+            _permanent_delete_status = str(exc)
+            self._session = None
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        _permanent_delete_status = (
+            f"Permanent deletion: {self._session.completed_files}/"
+            f"{self._session.total_files} files"
+        )
+        if outcome is None:
+            return {"RUNNING_MODAL"}
+        self._remove_timer(context)
+        refresh_project_inventory(str(bpy.data.filepath))
+        _permanent_delete_status = (
+            f"Permanently deleted {outcome.item_count} Trash item(s)"
+        )
+        self._session = None
+        self.report({"INFO"}, _permanent_delete_status)
+        return {"FINISHED"}
+
+    def cancel(self, context):
+        global _permanent_delete_status
+        message = ""
+        if self._session is not None:
+            try:
+                self._session.cancel()
+            except (PartialDeletionError, ProjectLifecycleError) as exc:
+                message = str(exc)
+            self._session = None
+        self._remove_timer(context)
+        refresh_project_inventory(str(getattr(bpy.data, "filepath", "")))
+        _permanent_delete_status = message
+
+
 class _LINGBOTMAP_LifecyclePanel:
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -1264,64 +1869,117 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         )
         external.target_scene_pointer = str(context.scene.as_pointer())
         blend_path = getattr(bpy.data, "filepath", "")
-        scene_uuid = context.scene.get("lingbot_map_scene_uuid") if blend_path else None
-        results = discover_ready_results(blend_path, scene_uuid=scene_uuid) if blend_path else ()
+        snapshot = project_inventory_snapshot(blend_path)
+        self.layout.operator(
+            LINGBOTMAP_OT_refresh_project_inventory.bl_idname,
+            text="Refresh Project Inventory",
+            icon="FILE_REFRESH",
+        )
+        if snapshot is None:
+            self.layout.label(
+                text="Save the Blender file to discover Project Results",
+                icon="INFO",
+            )
+            results = ()
+            lifecycle_actions_enabled = False
+        else:
+            state = "complete" if snapshot.complete else "scanning"
+            self.layout.label(
+                text=(
+                    f"Project inventory: {state} · "
+                    f"{snapshot.scanned_entries:,} direct entries"
+                )
+            )
+            if _project_inventory_error:
+                self.layout.label(
+                    text=f"Inventory stopped safely: {_project_inventory_error}",
+                    icon="ERROR",
+                )
+            if snapshot.jobs_abnormal:
+                self.layout.label(
+                    text=(
+                        "Lifecycle actions disabled: more than 32 "
+                        ".jobs entries"
+                    ),
+                    icon="ERROR",
+                )
+            lifecycle_actions_enabled = bool(
+                not snapshot.jobs_abnormal
+                and not _project_inventory_error
+            )
+            results = _inventory_rows(snapshot, "results")
+            result_total = sum(
+                item.category == "results" for item in snapshot.items
+            )
+            _draw_inventory_page_controls(
+                self.layout, "results", result_total, "Results"
+            )
         imported = _imported_reconstruction_collections(context.scene)
         imported_by_id = {}
         for collection in imported:
             imported_by_id.setdefault(
                 collection.get("lingbot_map_result_id"), []
             ).append(collection)
-        if not results and not imported:
+        if (
+            not results
+            and not imported
+            and (snapshot is None or snapshot.complete)
+        ):
             self.layout.label(text="No Reconstruction Results discovered")
             return
         self.layout.label(text=get_import_status())
         drawn_imported = set()
         for result in results:
             box = self.layout.box()
-            box.label(text="Ready", icon="CHECKMARK")
-            box.label(text=f"{result.profile_name}: {result.point_count:,} points")
-            box.label(text=f"{result.frame_count:,} frames · {result.result_id}")
-            if result.alignment_boundary_count:
-                if result.quality_warning_count:
-                    box.label(
-                        text=f"Quality Warning: {result.quality_warning_count} window boundaries",
-                        icon="ERROR",
-                    )
-                    box.label(text=f"Worst boundary {result.worst_boundary}")
-                else:
-                    box.label(
-                        text=f"Window alignment: {result.alignment_boundary_count} boundaries · no warnings"
-                    )
-            if result.dense_status == "available":
-                box.label(text="Dense Predictions: available", icon="CHECKMARK")
-            elif result.dense_status == "incompatible":
-                box.label(text="Dense Predictions: incompatible version", icon="ERROR")
-            elif result.dense_status == "unavailable":
-                box.label(text="Dense Predictions: unavailable; core Result remains usable", icon="ERROR")
-            if result.sky_masked:
+            if result.status != "recognized":
                 box.label(
-                    text=f"Sky Masking: enabled ({result.sky_cache_status})",
-                    icon="CHECKMARK",
+                    text=f"Unrecognized: {result.name}",
+                    icon="ERROR",
                 )
-                if result.sky_count_above_95_percent:
-                    box.label(
-                        text=(
-                            "Sky Mask warning: "
-                            f"{result.sky_count_above_95_percent} frames exceed 95% sky"
-                        ),
-                        icon="ERROR",
-                    )
+                box.label(text=result.detail or "No action is available")
+                continue
+            box.label(
+                text="Discovered Result · fully validates on action",
+                icon="INFO",
+            )
+            box.label(
+                text=(
+                    f"{result.profile_name}: "
+                    f"{int(result.point_count or 0):,} points"
+                )
+            )
+            box.label(
+                text=(
+                    f"{int(result.frame_count or 0):,} frames · "
+                    f"{result.result_id}"
+                )
+            )
+            box.label(
+                text=f"Target Scene: {result.scene_name} · {result.scene_uuid}"
+            )
+            result_directory = (
+                project_result_root(blend_path)
+                / "results"
+                / result.name
+            )
             claims = tuple(imported_by_id.get(result.result_id, ()))
             if not claims:
-                action = box.operator(
-                    LINGBOTMAP_OT_import_result.bl_idname,
-                    text="Import",
-                    icon="IMPORT",
-                )
-                action.result_directory = str(result.directory)
+                if (
+                    str(
+                        context.scene.get(
+                            "lingbot_map_scene_uuid", ""
+                        )
+                    )
+                    == result.scene_uuid
+                ):
+                    action = box.operator(
+                        LINGBOTMAP_OT_import_result.bl_idname,
+                        text="Import",
+                        icon="IMPORT",
+                    )
+                    action.result_directory = str(result_directory)
                 self._draw_import_into_actions(
-                    box, context.scene, result.directory
+                    box, context.scene, result_directory
                 )
             elif len(claims) > 1:
                 box.label(
@@ -1347,6 +2005,30 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                             text=f"{collection.name}: {inspection.message}",
                             icon="ERROR",
                         )
+            if result.dense_status == "retained-unvalidated":
+                box.label(
+                    text="Dense Predictions: retained; validates on action",
+                    icon="INFO",
+                )
+                if lifecycle_actions_enabled:
+                    dense = box.operator(
+                        LINGBOTMAP_OT_trash_dense.bl_idname,
+                        text="Remove Dense Predictions",
+                        icon="TRASH",
+                    )
+                    dense.result_name = result.name
+            if lifecycle_actions_enabled:
+                trash = box.operator(
+                    LINGBOTMAP_OT_trash_result.bl_idname,
+                    text="Move Result to Project Trash",
+                    icon="TRASH",
+                )
+                trash.result_name = result.name
+            else:
+                box.label(
+                    text="Project disk lifecycle actions are disabled",
+                    icon="ERROR",
+                )
             for collection in claims:
                 drawn_imported.add(result.result_id)
                 self._draw_managed_collection(
@@ -1545,13 +2227,178 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         guide.result_id = result_id
 
 
+def _draw_project_trash(layout, snapshot, lifecycle_actions_enabled):
+    layout.separator()
+    layout.label(text="Project Trash")
+    if _permanent_delete_status:
+        layout.label(
+            text=_permanent_delete_status,
+            icon=(
+                "ERROR"
+                if "partial" in _permanent_delete_status.casefold()
+                else "INFO"
+            ),
+        )
+    trash_items = _inventory_rows(snapshot, "trash")
+    total = sum(item.category == "trash" for item in snapshot.items)
+    if not trash_items:
+        layout.label(
+            text=(
+                "Project Trash is empty"
+                if snapshot.complete
+                else "Scanning direct Project entries…"
+            )
+        )
+    for item in trash_items:
+        box = layout.box()
+        if item.status == "unrecognized" or not item.ordinary:
+            box.label(
+                text=f"Unrecognized: {item.name}",
+                icon="ERROR",
+            )
+            box.label(text=item.detail or "No action is available")
+            continue
+        partial = item.status.endswith("-partial_delete")
+        box.label(
+            text=f"{item.status}: {item.name}",
+            icon="ERROR" if partial else "INFO",
+        )
+        if partial:
+            box.label(
+                text="Deletion was interrupted; inspect or retry",
+                icon="ERROR",
+            )
+        elif lifecycle_actions_enabled:
+            restore = box.operator(
+                LINGBOTMAP_OT_restore_trash.bl_idname,
+                text="Restore Exact Item",
+            )
+            restore.trash_name = item.name
+        if lifecycle_actions_enabled:
+            delete = box.operator(
+                LINGBOTMAP_OT_delete_trash.bl_idname,
+                text=(
+                    "Retry Permanent Delete"
+                    if partial
+                    else "Permanently Delete"
+                ),
+                icon="TRASH",
+            )
+            delete.trash_name = item.name
+        else:
+            box.label(
+                text="Project disk lifecycle actions are disabled",
+                icon="ERROR",
+            )
+    _draw_inventory_page_controls(
+        layout, "trash", total, "Trash"
+    )
+
+
 class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
     bl_idname = "LINGBOTMAP_PT_diagnostics"
     bl_label = "Diagnostics"
     bl_order = 4
 
     def draw(self, _context):
-        self.layout.label(text="No diagnostics")
+        blend_path = str(getattr(bpy.data, "filepath", ""))
+        snapshot = project_inventory_snapshot(blend_path)
+        if snapshot is None:
+            self.layout.label(
+                text="Save the Blender file to inspect Diagnostics"
+            )
+            return
+        if _project_inventory_error:
+            self.layout.label(
+                text=f"Inventory stopped safely: {_project_inventory_error}",
+                icon="ERROR",
+            )
+        lifecycle_actions_enabled = bool(
+            not snapshot.jobs_abnormal
+            and not _project_inventory_error
+        )
+        if snapshot.jobs_abnormal:
+            self.layout.label(
+                text="Abnormal Project: more than 32 .jobs entries",
+                icon="ERROR",
+            )
+        unrecognized_jobs = tuple(
+            item
+            for item in snapshot.items
+            if item.category == "jobs"
+            and item.status != "recognized"
+        )
+        job_page = _project_inventory_pages["jobs"]
+        visible_jobs = unrecognized_jobs[
+            job_page * 200 : (job_page + 1) * 200
+        ]
+        for item in visible_jobs:
+            box = self.layout.box()
+            box.label(
+                text=f"Unrecognized .jobs entry: {item.name}",
+                icon="ERROR",
+            )
+            box.label(text=item.detail or "No lifecycle action is available")
+        _draw_inventory_page_controls(
+            self.layout,
+            "jobs",
+            len(unrecognized_jobs),
+            "Unrecognized Jobs",
+        )
+        diagnostics = _inventory_rows(snapshot, "diagnostics")
+        total = sum(
+            item.category == "diagnostics" for item in snapshot.items
+        )
+        if not diagnostics:
+            self.layout.label(
+                text=(
+                    "No Diagnostics"
+                    if snapshot.complete
+                    else "Scanning direct Project entries…"
+                )
+            )
+        for item in diagnostics:
+            box = self.layout.box()
+            icon = "INFO" if item.status == "recognized" else "ERROR"
+            box.label(text=item.name, icon=icon)
+            if item.status != "recognized":
+                box.label(text=item.detail or "Unrecognized; no action")
+                continue
+            box.label(text="Retained by default")
+            if lifecycle_actions_enabled:
+                action = box.operator(
+                    LINGBOTMAP_OT_trash_diagnostic.bl_idname,
+                    text="Move to Project Trash",
+                    icon="TRASH",
+                )
+                action.diagnostic_name = item.name
+        recognized_diagnostics = tuple(
+            item.name
+            for item in diagnostics
+            if item.status == "recognized"
+        )[:200]
+        if (
+            lifecycle_actions_enabled
+            and len(recognized_diagnostics) > 1
+        ):
+            multi = self.layout.operator(
+                LINGBOTMAP_OT_trash_diagnostic.bl_idname,
+                text=(
+                    "Move First "
+                    f"{len(recognized_diagnostics)} Displayed Diagnostics"
+                ),
+                icon="TRASH",
+            )
+            multi.diagnostic_names_json = json.dumps(
+                recognized_diagnostics,
+                separators=(",", ":"),
+            )
+        _draw_inventory_page_controls(
+            self.layout, "diagnostics", total, "Diagnostics"
+        )
+        _draw_project_trash(
+            self.layout, snapshot, lifecycle_actions_enabled
+        )
 
 
 CLASSES = (
@@ -1581,6 +2428,13 @@ CLASSES = (
     LINGBOTMAP_OT_relink_source_background,
     LINGBOTMAP_OT_source_background_visibility,
     LINGBOTMAP_OT_toggle_model_coverage,
+    LINGBOTMAP_OT_refresh_project_inventory,
+    LINGBOTMAP_OT_load_more_project_items,
+    LINGBOTMAP_OT_trash_result,
+    LINGBOTMAP_OT_trash_dense,
+    LINGBOTMAP_OT_trash_diagnostic,
+    LINGBOTMAP_OT_restore_trash,
+    LINGBOTMAP_OT_delete_trash,
     LINGBOTMAP_PT_setup,
     LINGBOTMAP_PT_reconstruct,
     LINGBOTMAP_PT_active_job,

@@ -172,10 +172,15 @@ def _alignment_status(raw: Any) -> tuple[int, int, str | None]:
     return len(alignment["boundaries"]), len(warning_boundaries), worst
 
 
-def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> ReadyResult:
+def read_ready_result(
+    directory: Path,
+    *,
+    scene_uuid: str | None = None,
+    require_canonical_directory: bool = True,
+) -> ReadyResult:
     directory = Path(os.path.abspath(directory))
     if (
-        not RESULT_DIRECTORY.fullmatch(directory.name)
+        (require_canonical_directory and not RESULT_DIRECTORY.fullmatch(directory.name))
         or not directory.is_dir()
         or directory.is_symlink()
         or is_reparse_point(directory)

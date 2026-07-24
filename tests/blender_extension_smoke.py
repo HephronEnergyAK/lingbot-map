@@ -18,10 +18,28 @@ PANEL_TYPES = (
     "LINGBOTMAP_PT_results",
     "LINGBOTMAP_PT_diagnostics",
 )
+PROJECT_LIFECYCLE_OPERATORS = (
+    "refresh_project_inventory",
+    "load_more_project_items",
+    "trash_result",
+    "trash_dense",
+    "trash_diagnostic",
+    "restore_trash",
+    "delete_trash",
+)
 
 
 def panels_registered():
     return all(hasattr(bpy.types, name) for name in PANEL_TYPES)
+
+
+def project_lifecycle_operators_registered():
+    for name in PROJECT_LIFECYCLE_OPERATORS:
+        try:
+            getattr(bpy.ops.lingbot_map, name).get_rna_type()
+        except (AttributeError, KeyError, RuntimeError, ValueError):
+            return False
+    return True
 
 
 def main():
@@ -33,6 +51,7 @@ def main():
     decision = extension.get_host_decision()
     assert decision is not None
     assert panels_registered()
+    assert project_lifecycle_operators_registered()
     preferences_class = next(
         extension_class
         for extension_class in extension.CLASSES
@@ -55,11 +74,13 @@ def main():
 
     addon_utils.disable(MODULE_NAME, default_set=False)
     assert not panels_registered()
+    assert not project_lifecycle_operators_registered()
     assert extension.get_host_decision() is None
 
     extension = importlib.reload(extension)
     addon_utils.enable(MODULE_NAME, default_set=False)
     assert panels_registered()
+    assert project_lifecycle_operators_registered()
     assert extension.get_host_decision() is not None
 
     addon_utils.disable(MODULE_NAME, default_set=False)
@@ -76,6 +97,9 @@ def main():
                 "host_supported": extension.get_host_decision().supported,
                 "host_code": extension.get_host_decision().code,
                 "panels": list(PANEL_TYPES),
+                "project_lifecycle_operators": list(
+                    PROJECT_LIFECYCLE_OPERATORS
+                ),
                 "preferences": ["runtime_root", "gpu_uuid", "offline_setup"],
                 "sky_mask_property": {
                     "type": sky_property.type,

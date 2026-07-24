@@ -279,6 +279,84 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(len(self.registration.registered), len(self.extension.CLASSES))
         self.assertFalse(self.extension.get_host_decision().supported)
 
+    def test_completed_job_refreshes_bounded_inventory_once_then_waits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            blend = Path(temporary) / "target.blend"
+            blend.touch()
+            self.bpy.data = SimpleNamespace(filepath=str(blend))
+            snapshot = SimpleNamespace(
+                state="succeeded",
+                job_id="job-" + "a" * 32,
+                target_blend=str(blend),
+            )
+            ready = SimpleNamespace(job_id=snapshot.job_id)
+            with (
+                mock.patch.object(
+                    self.extension,
+                    "get_job_snapshot",
+                    return_value=snapshot,
+                ),
+                mock.patch.object(
+                    self.extension,
+                    "refresh_project_inventory",
+                ) as refresh,
+                mock.patch.object(
+                    self.extension,
+                    "ready_results_for_completed_job",
+                    side_effect=[None, (ready,)],
+                ),
+                mock.patch.object(
+                    self.extension,
+                    "attempt_auto_import_once",
+                    return_value=SimpleNamespace(),
+                ) as attempt,
+            ):
+                self.extension._attempt_completed_result_auto_import()
+                self.assertIsNone(
+                    self.extension._last_completed_job_for_auto_import
+                )
+                self.extension._attempt_completed_result_auto_import()
+            refresh.assert_called_once_with(str(blend))
+            attempt.assert_called_once()
+            self.assertEqual(
+                self.extension._last_completed_job_for_auto_import,
+                snapshot.job_id,
+            )
+
+    def test_completed_job_after_file_change_never_auto_imports_later(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            current = Path(temporary) / "current.blend"
+            target = Path(temporary) / "target.blend"
+            current.touch()
+            target.touch()
+            self.bpy.data = SimpleNamespace(filepath=str(current))
+            snapshot = SimpleNamespace(
+                state="succeeded",
+                job_id="job-" + "b" * 32,
+                target_blend=str(target),
+            )
+            with (
+                mock.patch.object(
+                    self.extension,
+                    "get_job_snapshot",
+                    return_value=snapshot,
+                ),
+                mock.patch.object(
+                    self.extension,
+                    "ready_results_for_completed_job",
+                ) as ready,
+                mock.patch.object(
+                    self.extension, "attempt_auto_import_once"
+                ) as attempt,
+            ):
+                self.extension._attempt_completed_result_auto_import()
+            ready.assert_not_called()
+            attempt.assert_not_called()
+            self.assertEqual(
+                self.extension._last_completed_job_for_auto_import,
+                snapshot.job_id,
+            )
+
     def test_lifecycle_panels_are_ordered_and_machine_settings_stay_in_preferences(self):
         classes = self.extension.CLASSES
         preferences = classes[0]
@@ -314,12 +392,25 @@ class RegistrationTests(unittest.TestCase):
                 "lingbot_map.relink_source_background",
                 "lingbot_map.source_background_visibility",
                 "lingbot_map.toggle_model_coverage",
+                "lingbot_map.refresh_project_inventory",
+                "lingbot_map.load_more_project_items",
+                "lingbot_map.trash_result",
+                "lingbot_map.trash_dense",
+                "lingbot_map.trash_diagnostic",
+                "lingbot_map.restore_trash",
+                "lingbot_map.delete_trash",
             ],
         )
         self.assertEqual([panel.bl_order for panel in panels], [0, 1, 2, 3, 4])
         self.assertEqual(
             [panel.bl_label for panel in panels],
-            ["Setup", "Reconstruct", "Active Job", "Results", "Diagnostics"],
+            [
+                "Setup",
+                "Reconstruct",
+                "Active Job",
+                "Results",
+                "Diagnostics",
+            ],
         )
         self.assertTrue(all(panel.bl_space_type == "VIEW_3D" for panel in panels))
         self.assertTrue(all(panel.bl_region_type == "UI" for panel in panels))
@@ -389,6 +480,75 @@ class RegistrationTests(unittest.TestCase):
             any("does not detect or remove Dynamic Content" in label for label in labels)
         )
         self.assertTrue(any("Moving people and vehicles" in label for label in labels))
+
+    def test_results_draw_uses_snapshot_and_exposes_no_unrecognized_action(self):
+        panel_class = next(
+            item
+            for item in self.extension.CLASSES
+            if item.__name__ == "LINGBOTMAP_PT_results"
+        )
+        panel = panel_class()
+        panel.layout = FakeLayout()
+
+        class Scene(dict):
+            collection = SimpleNamespace(children=())
+
+            @staticmethod
+            def as_pointer():
+                return 7
+
+        scene = Scene(
+            lingbot_map_scene_uuid=(
+                "12345678-1234-4321-8765-123456789abc"
+            )
+        )
+        self.bpy.data = SimpleNamespace(
+            filepath=r"C:\project\target.blend",
+            scenes=(scene,),
+        )
+        snapshot = self.ui.InventorySnapshot(
+            scanned_entries=1,
+            complete=True,
+            jobs_abnormal=False,
+            items=(
+                importlib.import_module(
+                    "blender_extension.project_lifecycle"
+                ).InventoryItem(
+                    "results",
+                    "malformed",
+                    "unrecognized",
+                    True,
+                    detail="Malformed Result",
+                ),
+            ),
+        )
+        with (
+            mock.patch.object(
+                self.ui,
+                "project_inventory_snapshot",
+                return_value=snapshot,
+            ),
+            mock.patch(
+                "os.scandir",
+                side_effect=AssertionError("draw performed discovery"),
+            ),
+        ):
+            panel.draw(SimpleNamespace(scene=scene))
+        labels = [
+            event[1]
+            for event in panel.layout.events
+            if event[0] == "label"
+        ]
+        operators = [
+            event[1]
+            for event in panel.layout.events
+            if event[0] == "operator"
+        ]
+        self.assertTrue(
+            any("Unrecognized: malformed" in label for label in labels)
+        )
+        self.assertNotIn("lingbot_map.trash_result", operators)
+        self.assertNotIn("lingbot_map.import_result", operators)
 
     def test_gpu_test_persists_only_unambiguous_physical_uuid_before_nonmodal_start(self):
         with mock.patch.object(

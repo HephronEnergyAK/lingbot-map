@@ -981,7 +981,10 @@ def _validate_manifest_contract(
 
 
 def validate_result(
-    directory: str | Path, *, cancel: CancelCheck | None = None
+    directory: str | Path,
+    *,
+    cancel: CancelCheck | None = None,
+    require_canonical_directory: bool = True,
 ) -> ValidatedResult:
     """Validate all core files and semantics before Blender allocation."""
 
@@ -989,7 +992,10 @@ def validate_result(
     _cancelled(cancel, "validation")
     root = Path(os.path.abspath(directory))
     try:
-        ready = read_ready_result(root)
+        ready = read_ready_result(
+            root,
+            require_canonical_directory=require_canonical_directory,
+        )
     except (IpcError, OSError, ValueError) as exc:
         raise ResultImportError(f"Result discovery validation failed: {exc}") from exc
     manifest_path = _plain_relative_file(root, "manifest.json")

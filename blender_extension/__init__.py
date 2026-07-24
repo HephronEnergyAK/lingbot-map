@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
@@ -13,13 +15,20 @@ from .runtime import (
     get_host_decision,
     set_host_decision,
 )
-from .ui import CLASSES
+from .ui import (
+    CLASSES,
+    advance_project_inventory,
+    clear_project_inventory,
+    ready_results_for_completed_job,
+    refresh_project_inventory,
+)
 from .gpu_capability import shutdown_gpu_capability
 from .job_lifecycle import (
     CAPTURE_SOURCE_PROPERTY,
     CAMERA_ITERATIONS_PROPERTY,
     CONFIDENCE_CUTOFF_PROPERTY,
     DEPTH_CUTOFF_PROPERTY,
+    JobLifecycleError,
     POINT_BUDGET_CONFIRMED_PROPERTY,
     POINT_BUDGET_PROPERTY,
     PROFILE_PROPERTY,
@@ -28,6 +37,7 @@ from .job_lifecycle import (
     SKY_MASK_PROPERTY,
     detach_job_monitor,
     get_job_snapshot,
+    normalized_blend_path,
     recover_jobs_for_blend,
     report_job_recovery_error,
 )
@@ -38,11 +48,9 @@ from .result_import import (
     attempt_auto_import_once,
     set_import_status,
 )
-from .results import discover_ready_results
-
-
 _registered_classes: list[type] = []
 _last_completed_job_for_auto_import: str | None = None
+_pending_completed_job_inventory: str | None = None
 _scene_identity_markers_pending_save: list[object] = []
 _PROFILE_GUARD = "_lingbot_map_profile_update"
 _PROFILE_DEFAULTS = {
@@ -169,6 +177,7 @@ def _restore_scene_identity_markers_after_failed_save(_unused) -> None:
 
 
 def _job_ui_timer():
+    advance_project_inventory(str(getattr(bpy.data, "filepath", "")))
     _attempt_completed_result_auto_import()
     for window in getattr(bpy.context.window_manager, "windows", ()):
         for area in window.screen.areas:
@@ -181,21 +190,46 @@ def _attempt_completed_result_auto_import() -> None:
     """Attempt only on a newly observed completion, never on a later idle tick."""
 
     global _last_completed_job_for_auto_import
+    global _pending_completed_job_inventory
     snapshot = get_job_snapshot()
     if snapshot.state != "succeeded" or not snapshot.job_id:
         return
     if snapshot.job_id == _last_completed_job_for_auto_import:
         return
-    _last_completed_job_for_auto_import = snapshot.job_id
     filepath = str(getattr(bpy.data, "filepath", ""))
     if not filepath:
+        _last_completed_job_for_auto_import = snapshot.job_id
+        _pending_completed_job_inventory = None
         return
     try:
-        matches = tuple(
-            item
-            for item in discover_ready_results(filepath)
-            if item.job_id == snapshot.job_id
+        current_target = normalized_blend_path(filepath)
+        completed_target = normalized_blend_path(
+            str(snapshot.target_blend or "")
         )
+    except (JobLifecycleError, ValueError):
+        _last_completed_job_for_auto_import = snapshot.job_id
+        _pending_completed_job_inventory = None
+        return
+    if os.path.normcase(str(current_target)) != os.path.normcase(
+        str(completed_target)
+    ):
+        _last_completed_job_for_auto_import = snapshot.job_id
+        _pending_completed_job_inventory = None
+        set_import_status(
+            "Ready to Import: completed after the user changed files"
+        )
+        return
+    try:
+        if _pending_completed_job_inventory != snapshot.job_id:
+            refresh_project_inventory(filepath)
+            _pending_completed_job_inventory = snapshot.job_id
+        matches = ready_results_for_completed_job(
+            filepath, snapshot.job_id
+        )
+        if matches is None:
+            return
+        _last_completed_job_for_auto_import = snapshot.job_id
+        _pending_completed_job_inventory = None
         if len(matches) != 1:
             set_import_status(
                 "Automatic import not attempted: completed Job has no unique Ready Result"
@@ -226,6 +260,7 @@ def register() -> None:
         return
 
     global _last_completed_job_for_auto_import
+    global _pending_completed_job_inventory
     decision = probe_supported_host(tuple(bpy.app.version))
     set_host_decision(decision)
     try:
@@ -317,6 +352,7 @@ def register() -> None:
             _last_completed_job_for_auto_import = (
                 snapshot.job_id if snapshot.state == "succeeded" else None
             )
+            _pending_completed_job_inventory = None
     except Exception:
         _remove_import_external_result_menu()
         _remove_handlers_and_timer()
@@ -330,16 +366,19 @@ def unregister() -> None:
     """Cleanly remove every registered class in reverse order."""
 
     global _last_completed_job_for_auto_import
+    global _pending_completed_job_inventory
     cancel_runtime_setup()
     cancel_model_setup()
     shutdown_gpu_capability()
     detach_job_monitor()
     clear_model_coverage_guides()
+    clear_project_inventory()
     _unregister_scene_property()
     _remove_import_external_result_menu()
     _remove_handlers_and_timer()
     _unregister_classes()
     _last_completed_job_for_auto_import = None
+    _pending_completed_job_inventory = None
     clear_host_decision()
 
 
