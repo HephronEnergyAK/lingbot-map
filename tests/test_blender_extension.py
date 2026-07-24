@@ -283,6 +283,7 @@ class RegistrationTests(unittest.TestCase):
                 "lingbot_map.run_preflight_job",
                 "lingbot_map.run_reconstruction_job",
                 "lingbot_map.cancel_active_job",
+                "lingbot_map.import_result",
             ],
         )
         self.assertEqual([panel.bl_order for panel in panels], [0, 1, 2, 3, 4])

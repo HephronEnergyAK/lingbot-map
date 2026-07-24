@@ -48,6 +48,14 @@ from .job_lifecycle import (
     start_reconstruction_job,
 )
 from .results import discover_ready_results
+from .result_import import (
+    ImportCapacityError,
+    ResultImportCancelled,
+    ResultImportError,
+    get_import_status,
+    import_result,
+    set_import_status,
+)
 
 
 PROFILE_DEFAULTS = {
@@ -496,6 +504,46 @@ class LINGBOTMAP_OT_cancel_active_job(bpy.types.Operator):
             return {"CANCELLED"}
 
 
+class LINGBOTMAP_OT_import_result(bpy.types.Operator):
+    """Explicitly import one fully validated Ready Result."""
+
+    bl_idname = "lingbot_map.import_result"
+    bl_label = "Import Reconstruction Result"
+    bl_description = (
+        "Validate and capacity-gate this Result, then transactionally import it"
+    )
+
+    result_directory: StringProperty(
+        name="Result Directory",
+        description="Exact published Reconstruction Result directory",
+        subtype="DIR_PATH",
+        options={"HIDDEN"},
+    )
+
+    def execute(self, context):
+        try:
+            outcome = import_result(
+                self.result_directory,
+                context.scene,
+                context=context,
+            )
+        except ResultImportCancelled as exc:
+            set_import_status(str(exc))
+            self.report({"WARNING"}, str(exc))
+            return {"CANCELLED"}
+        except (ImportCapacityError, ResultImportError, OSError, MemoryError) as exc:
+            set_import_status(str(exc))
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except Exception as exc:
+            message = f"Import failed and was rolled back: {type(exc).__name__}: {exc}"
+            set_import_status(message)
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+        self.report({"INFO"}, outcome.message)
+        return {"FINISHED"}
+
+
 class _LINGBOTMAP_LifecyclePanel:
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -671,6 +719,7 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         if not results:
             self.layout.label(text="No Reconstruction Results discovered")
             return
+        self.layout.label(text=get_import_status())
         for result in results:
             box = self.layout.box()
             box.label(text="Ready", icon="CHECKMARK")
@@ -706,6 +755,12 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                         ),
                         icon="ERROR",
                     )
+            action = box.operator(
+                LINGBOTMAP_OT_import_result.bl_idname,
+                text="Import",
+                icon="IMPORT",
+            )
+            action.result_directory = str(result.directory)
 
 
 class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
@@ -731,6 +786,7 @@ CLASSES = (
     LINGBOTMAP_OT_run_preflight_job,
     LINGBOTMAP_OT_run_reconstruction_job,
     LINGBOTMAP_OT_cancel_active_job,
+    LINGBOTMAP_OT_import_result,
     LINGBOTMAP_PT_setup,
     LINGBOTMAP_PT_reconstruct,
     LINGBOTMAP_PT_active_job,

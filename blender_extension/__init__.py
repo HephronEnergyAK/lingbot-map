@@ -26,12 +26,21 @@ from .job_lifecycle import (
     RETAIN_DENSE_PROPERTY,
     SKY_MASK_PROPERTY,
     detach_job_monitor,
+    get_job_snapshot,
     recover_jobs_for_blend,
     report_job_recovery_error,
 )
+from .result_import import (
+    ImportCapacityError,
+    ResultImportError,
+    attempt_auto_import_once,
+    set_import_status,
+)
+from .results import discover_ready_results
 
 
 _registered_classes: list[type] = []
+_last_completed_job_for_auto_import: str | None = None
 _PROFILE_GUARD = "_lingbot_map_profile_update"
 _PROFILE_DEFAULTS = {
     "Draft": (1, 70.0, 99.5, 1_000_000),
@@ -79,11 +88,54 @@ def _recover_jobs_after_load(_unused) -> None:
 
 
 def _job_ui_timer():
+    _attempt_completed_result_auto_import()
     for window in getattr(bpy.context.window_manager, "windows", ()):
         for area in window.screen.areas:
             if area.type == "VIEW_3D":
                 area.tag_redraw()
     return 0.5
+
+
+def _attempt_completed_result_auto_import() -> None:
+    """Attempt only on a newly observed completion, never on a later idle tick."""
+
+    global _last_completed_job_for_auto_import
+    snapshot = get_job_snapshot()
+    if snapshot.state != "succeeded" or not snapshot.job_id:
+        return
+    if snapshot.job_id == _last_completed_job_for_auto_import:
+        return
+    _last_completed_job_for_auto_import = snapshot.job_id
+    filepath = str(getattr(bpy.data, "filepath", ""))
+    if not filepath:
+        return
+    try:
+        matches = tuple(
+            item
+            for item in discover_ready_results(filepath)
+            if item.job_id == snapshot.job_id
+        )
+        if len(matches) != 1:
+            set_import_status(
+                "Automatic import not attempted: completed Job has no unique Ready Result"
+            )
+            return
+        outcome = attempt_auto_import_once(
+            matches[0],
+            expected_job_id=snapshot.job_id,
+            bpy_module=bpy,
+        )
+        if outcome is None:
+            set_import_status(
+                "Ready to Import: automatic import gates did not all pass"
+            )
+    except (ImportCapacityError, ResultImportError, OSError, MemoryError) as exc:
+        set_import_status(f"Ready to Import: automatic import blocked: {exc}")
+    except Exception as exc:
+        set_import_status(
+            "Ready to Import: automatic import failed and was rolled back: "
+            f"{type(exc).__name__}: {exc}"
+        )
 
 
 def register() -> None:
@@ -92,6 +144,7 @@ def register() -> None:
     if _registered_classes:
         return
 
+    global _last_completed_job_for_auto_import
     decision = probe_supported_host(tuple(bpy.app.version))
     set_host_decision(decision)
     try:
@@ -152,6 +205,10 @@ def register() -> None:
             timers.register(_job_ui_timer, first_interval=0.1, persistent=True)
         if hasattr(bpy, "data"):
             _recover_jobs_after_load(None)
+            snapshot = get_job_snapshot()
+            _last_completed_job_for_auto_import = (
+                snapshot.job_id if snapshot.state == "succeeded" else None
+            )
     except Exception:
         _unregister_scene_property()
         _unregister_classes()
@@ -162,6 +219,7 @@ def register() -> None:
 def unregister() -> None:
     """Cleanly remove every registered class in reverse order."""
 
+    global _last_completed_job_for_auto_import
     cancel_runtime_setup()
     cancel_model_setup()
     shutdown_gpu_capability()
@@ -174,6 +232,7 @@ def unregister() -> None:
     if timers is not None and timers.is_registered(_job_ui_timer):
         timers.unregister(_job_ui_timer)
     _unregister_classes()
+    _last_completed_job_for_auto_import = None
     clear_host_decision()
 
 
