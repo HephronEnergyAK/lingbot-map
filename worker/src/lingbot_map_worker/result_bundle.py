@@ -30,6 +30,18 @@ MAX_NPY_HEADER_BYTES = 64 * 1024
 RESULT_ID = re.compile(r"result-[0-9a-f]{32}\Z")
 JOB_ID = re.compile(r"job-[0-9a-f]{32}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+DISPLAY_TRANSFORMS = frozenset(
+    {
+        "identity",
+        "rotate_90_ccw",
+        "rotate_180",
+        "rotate_270_ccw",
+        "reflect_x",
+        "reflect_y",
+        "reflect_main_diagonal",
+        "reflect_anti_diagonal",
+    }
+)
 CancelCheck = Callable[[], bool]
 DiskCheck = Callable[[int], None]
 
@@ -68,6 +80,8 @@ class ResultPublication:
     arrays: Mapping[str, np.ndarray]
     voxel_edge_length: float
     voxel_origin: tuple[float, float, float]
+    source_display: Mapping[str, Any] | None = None
+    model_coverage: Mapping[str, Any] | None = None
     created_utc: str | None = None
     result_id: str | None = None
     dense_component: DenseComponentArtifact | None = None
@@ -370,6 +384,117 @@ def _walk_plain_files(root: Path, *, ignore_dense: bool = False) -> set[str]:
     return found
 
 
+def _validate_source_view_contract(
+    manifest: Mapping[str, Any], arrays: Mapping[str, np.ndarray]
+) -> None:
+    """Validate optional source-alignment metadata without weakening old Results."""
+
+    source_display = manifest.get("source_display")
+    model_coverage = manifest.get("model_coverage")
+    if (source_display is None) != (model_coverage is None):
+        raise ResultBundleError(
+            "source_display and model_coverage must be present together"
+        )
+    if source_display is None:
+        return
+    display = require_exact_object(
+        source_display,
+        {"width", "height", "display_transform"},
+        label="source_display",
+    )
+    for name in ("width", "height"):
+        value = display[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ResultBundleError(f"source_display {name} is invalid")
+    if display["display_transform"] not in DISPLAY_TRANSFORMS:
+        raise ResultBundleError("source_display Display Transform is unsupported")
+
+    coverage = require_exact_object(
+        model_coverage,
+        {
+            "coordinate_space",
+            "polygon",
+            "source_fraction",
+            "model_width",
+            "model_height",
+        },
+        label="model_coverage",
+    )
+    if coverage["coordinate_space"] != "source-display-pixel-edges":
+        raise ResultBundleError("Model Coverage coordinate space is unsupported")
+    model_width = coverage["model_width"]
+    model_height = coverage["model_height"]
+    if (
+        isinstance(model_width, bool)
+        or isinstance(model_height, bool)
+        or not isinstance(model_width, int)
+        or not isinstance(model_height, int)
+        or model_width != 518
+        or not 14 <= model_height <= 518
+        or model_height % 14
+    ):
+        raise ResultBundleError("Model Coverage grid is not the frozen 518/14 grid")
+    polygon = coverage["polygon"]
+    if (
+        not isinstance(polygon, list)
+        or len(polygon) != 4
+        or any(not isinstance(point, list) or len(point) != 2 for point in polygon)
+    ):
+        raise ResultBundleError("Model Coverage polygon must contain four points")
+    coordinates = np.asarray(polygon, dtype=np.float64)
+    if (
+        coordinates.shape != (4, 2)
+        or not bool(np.isfinite(coordinates).all())
+        or not bool(
+            ((coordinates[:, 0] >= 0) & (coordinates[:, 0] <= display["width"])).all()
+        )
+        or not bool(
+            ((coordinates[:, 1] >= 0) & (coordinates[:, 1] <= display["height"])).all()
+        )
+    ):
+        raise ResultBundleError(
+            "Model Coverage polygon lies outside source-display pixel edges"
+        )
+    homogeneous = np.concatenate(
+        (coordinates, np.ones((4, 1), dtype=np.float64)), axis=1
+    )
+    mapped = (
+        arrays["source_to_model"].astype(np.float64, copy=False) @ homogeneous.T
+    ).T
+    expected = np.asarray(
+        (
+            (0.0, 0.0, 1.0),
+            (float(model_width), 0.0, 1.0),
+            (float(model_width), float(model_height), 1.0),
+            (0.0, float(model_height), 1.0),
+        ),
+        dtype=np.float64,
+    )
+    if not np.allclose(mapped, expected, atol=1e-6, rtol=1e-9):
+        raise ResultBundleError(
+            "Model Coverage polygon disagrees with source_to_model"
+        )
+    x = coordinates[:, 0]
+    y = coordinates[:, 1]
+    area = abs(
+        float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+    ) / 2.0
+    actual_fraction = area / float(display["width"] * display["height"])
+    recorded_fraction = coverage["source_fraction"]
+    if (
+        isinstance(recorded_fraction, bool)
+        or not isinstance(recorded_fraction, (int, float))
+        or not math.isfinite(float(recorded_fraction))
+        or not 0 < recorded_fraction <= 1
+        or not math.isclose(
+            float(recorded_fraction), actual_fraction, abs_tol=1e-9, rel_tol=1e-9
+        )
+    ):
+        raise ResultBundleError(
+            "Model Coverage source fraction disagrees with its polygon"
+        )
+
+
 def validate_result_bundle(root: Path) -> dict[str, Any]:
     root = Path(os.path.abspath(root))
     if not root.is_dir() or root.is_symlink() or is_reparse_point(root):
@@ -384,7 +509,14 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
         not isinstance(manifest, dict)
         or not fields.issubset(manifest)
         or not set(manifest).issubset(
-            fields | {"dense_predictions", "window_alignment", "sky_statistics"}
+            fields
+            | {
+                "dense_predictions",
+                "window_alignment",
+                "sky_statistics",
+                "source_display",
+                "model_coverage",
+            }
         )
     ):
         raise ResultBundleError("Result manifest has unknown or missing fields")
@@ -531,6 +663,7 @@ def validate_result_bundle(root: Path) -> dict[str, Any]:
         arrays[name] = array
         declared.add(relative)
     point_count, frame_count = _validate_semantics(arrays)
+    _validate_source_view_contract(manifest, arrays)
     if counts != {"frames": frame_count, "points": point_count}:
         raise ResultBundleError("manifest counts disagree with core arrays")
     if point_count and not np.allclose(
@@ -1005,6 +1138,15 @@ def publish_result_bundle(
             "provenance": dict(publication.provenance),
             "logs": [log_descriptor],
         }
+        if (
+            publication.source_display is None
+        ) != (publication.model_coverage is None):
+            raise ResultBundleError(
+                "source_display and model_coverage must be published together"
+            )
+        if publication.source_display is not None:
+            manifest["source_display"] = dict(publication.source_display)
+            manifest["model_coverage"] = dict(publication.model_coverage)
         if dense_descriptor is not None:
             manifest["dense_predictions"] = dense_descriptor
         if publication.window_alignment is not None:

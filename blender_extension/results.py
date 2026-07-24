@@ -192,7 +192,13 @@ def read_ready_result(directory: Path, *, scene_uuid: str | None = None) -> Read
         or not required_fields.issubset(manifest)
         or not set(manifest).issubset(
             required_fields
-            | {"dense_predictions", "window_alignment", "sky_statistics"}
+            | {
+                "dense_predictions",
+                "window_alignment",
+                "sky_statistics",
+                "source_display",
+                "model_coverage",
+            }
         )
     ):
         raise IpcError("Result manifest has unknown or missing fields")

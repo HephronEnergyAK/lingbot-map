@@ -32,6 +32,17 @@ from .results import (
     ReadyResult,
     read_ready_result,
 )
+from .source_view import (
+    BACKGROUND_MAPPINGS,
+    SourceViewContract,
+    SourceViewError,
+    background_scale,
+    candidate_source_paths,
+    coverage_to_camera_border,
+    scene_aspect_matches,
+    validate_source_media,
+    validate_source_view_contract,
+)
 
 
 OWNERSHIP_SCHEMA = "1.0.0"
@@ -82,6 +93,10 @@ IMPORT_PHASES = (
     "source_frame",
     "material",
     "geometry_nodes",
+    "camera",
+    "camera_animation",
+    "trajectory",
+    "source_background",
     "ownership",
     "commit",
 )
@@ -125,6 +140,7 @@ class ValidatedResult:
     arrays: Mapping[str, np.ndarray]
     confidence_p5: float
     confidence_p95: float
+    source_view: SourceViewContract | None
 
 
 @dataclass(frozen=True)
@@ -141,12 +157,16 @@ class _Created:
     collections: list[Any]
     objects: list[Any]
     pointclouds: list[Any]
+    cameras: list[Any]
+    curves: list[Any]
+    movieclips: list[Any]
+    actions: list[Any]
     materials: list[Any]
     node_groups: list[Any]
 
     @classmethod
     def empty(cls) -> "_Created":
-        return cls([], [], [], [], [])
+        return cls([], [], [], [], [], [], [], [], [])
 
 
 class _MemoryStatusEx(ctypes.Structure):
@@ -969,7 +989,14 @@ def validate_result(
     if (
         not required.issubset(manifest)
         or not set(manifest).issubset(
-            required | {"dense_predictions", "window_alignment", "sky_statistics"}
+            required
+            | {
+                "dense_predictions",
+                "window_alignment",
+                "sky_statistics",
+                "source_display",
+                "model_coverage",
+            }
         )
         or manifest["schema_version"] != RESULT_SCHEMA_VERSION
         or not RESULT_ID.fullmatch(str(manifest["result_id"]))
@@ -998,6 +1025,12 @@ def validate_result(
         for name, raw in descriptors.items()
     }
     point_count, frame_count = _validate_array_semantics(arrays)
+    try:
+        source_view = validate_source_view_contract(
+            manifest, np.asarray(arrays["source_to_model"])
+        )
+    except SourceViewError as exc:
+        raise ResultImportError(str(exc)) from exc
     p5, p95 = _validate_manifest_contract(
         manifest, arrays, point_count, frame_count
     )
@@ -1076,7 +1109,9 @@ def validate_result(
             or final_length != descriptor["byte_length"]
         ):
             raise ResultImportError("Log changed during complete validation")
-    return ValidatedResult(ready, manifest, manifest_digest, arrays, p5, p95)
+    return ValidatedResult(
+        ready, manifest, manifest_digest, arrays, p5, p95, source_view
+    )
 
 
 def _metadata(document: ValidatedResult, scene: Any, kind: str) -> dict[str, Any]:
@@ -1105,10 +1140,15 @@ def _valid_claim(collection: Any, document: ValidatedResult, scene: Any) -> bool
     if any(collection.get(name) != value for name, value in expected.items()):
         return False
     objects = tuple(collection.objects)
-    if len(objects) != 2:
+    expected_kinds = {"reconstruction_root", "point_cloud"}
+    if document.source_view is not None:
+        expected_kinds.update(
+            {"reconstruction_camera", "camera_trajectory"}
+        )
+    if len(objects) != len(expected_kinds):
         return False
     kinds = {item.get("lingbot_map_kind") for item in objects}
-    if kinds != {"reconstruction_root", "point_cloud"}:
+    if kinds != expected_kinds:
         return False
     for item in objects:
         kind = item.get("lingbot_map_kind")
@@ -1349,6 +1389,322 @@ def _new_geometry_nodes(
     getattr(modifier.properties.inputs, scale_socket.identifier).value = 1.0
 
 
+def _track_action(created: _Created, datablock: Any) -> None:
+    animation_data = getattr(datablock, "animation_data", None)
+    action = getattr(animation_data, "action", None)
+    if action is not None and action not in created.actions:
+        created.actions.append(action)
+
+
+def _set_actions_linear(created: _Created) -> None:
+    """Handle Blender 5.2 layered Actions, including Object and Camera slots."""
+
+    for action in created.actions:
+        for layer in action.layers:
+            for strip in layer.strips:
+                for channelbag in strip.channelbags:
+                    for fcurve in channelbag.fcurves:
+                        for keyframe in fcurve.keyframe_points:
+                            keyframe.interpolation = "LINEAR"
+
+
+def _combined_bounds_diagonal(document: ValidatedResult) -> float:
+    minimum = np.full(3, np.inf, dtype=np.float64)
+    maximum = np.full(3, -np.inf, dtype=np.float64)
+    positions = document.arrays["positions"]
+    for start in range(0, len(positions), SEMANTIC_CHUNK_POINTS):
+        values = np.asarray(
+            positions[start : start + SEMANTIC_CHUNK_POINTS],
+            dtype=np.float64,
+        )
+        if len(values):
+            minimum = np.minimum(minimum, values.min(axis=0))
+            maximum = np.maximum(maximum, values.max(axis=0))
+    cameras = np.asarray(
+        document.arrays["camera_to_world"][:, :3, 3], dtype=np.float64
+    )
+    minimum = np.minimum(minimum, cameras.min(axis=0))
+    maximum = np.maximum(maximum, cameras.max(axis=0))
+    return float(np.linalg.norm(maximum - minimum))
+
+
+def _new_camera_animation(
+    bpy: Any,
+    collection: Any,
+    root_object: Any,
+    document: ValidatedResult,
+    scene: Any,
+    created: _Created,
+) -> tuple[Any, Any]:
+    from mathutils import Matrix
+
+    contract = document.source_view
+    if contract is None:
+        raise ResultImportError("Source-view contract is unavailable")
+    camera_data = bpy.data.cameras.new(
+        f"LingBot Map {document.ready.result_id[-8:]} Camera"
+    )
+    created.cameras.append(camera_data)
+    camera_data.type = "PERSP"
+    camera_data.sensor_fit = "HORIZONTAL"
+    camera_data.sensor_width = 36.0
+    camera_object = bpy.data.objects.new(
+        "Reconstruction Camera", camera_data
+    )
+    created.objects.append(camera_object)
+    collection.objects.link(camera_object)
+    camera_object.parent = root_object
+    camera_object.rotation_mode = "QUATERNION"
+
+    camera_to_world = document.arrays["camera_to_world"]
+    intrinsics = document.arrays["source_intrinsics"]
+    timeline_start = int(document.manifest["timeline_start"])
+    previous_rotation = None
+    for index in range(document.ready.frame_count):
+        matrix = Matrix(
+            np.asarray(camera_to_world[index], dtype=np.float64).tolist()
+        )
+        location, rotation, scale = matrix.decompose()
+        if not all(
+            math.isclose(float(value), 1.0, abs_tol=1e-4, rel_tol=0)
+            for value in scale
+        ):
+            raise ResultImportError(
+                "camera_to_world contains scale outside the rigid contract"
+            )
+        if (
+            previous_rotation is not None
+            and rotation.dot(previous_rotation) < 0
+        ):
+            rotation.negate()
+        previous_rotation = rotation.copy()
+        camera_object.location = location
+        camera_object.rotation_quaternion = rotation
+        source = np.asarray(intrinsics[index], dtype=np.float64)
+        fx = float(source[0, 0])
+        cx = float(source[0, 2])
+        cy = float(source[1, 2])
+        camera_data.lens = 36.0 * fx / contract.width
+        camera_data.shift_x = (contract.width * 0.5 - cx) / contract.width
+        camera_data.shift_y = (cy - contract.height * 0.5) / contract.width
+        frame = timeline_start + index
+        camera_object.keyframe_insert(data_path="location", frame=frame)
+        camera_object.keyframe_insert(
+            data_path="rotation_quaternion", frame=frame
+        )
+        camera_data.keyframe_insert(data_path="lens", frame=frame)
+        camera_data.keyframe_insert(data_path="shift_x", frame=frame)
+        camera_data.keyframe_insert(data_path="shift_y", frame=frame)
+    _track_action(created, camera_object)
+    _track_action(created, camera_data)
+    _set_actions_linear(created)
+
+    diagonal = _combined_bounds_diagonal(document)
+    camera_data.clip_start = max(diagonal * 1e-5, 1e-6)
+    camera_data.clip_end = max(
+        diagonal * 1.1, camera_data.clip_start * 1000.0
+    )
+    camera_data.display_size = max(diagonal * 0.025, 0.05)
+    return camera_object, camera_data
+
+
+def _new_camera_trajectory(
+    bpy: Any,
+    collection: Any,
+    root_object: Any,
+    document: ValidatedResult,
+    created: _Created,
+) -> tuple[Any, Any]:
+    curve = bpy.data.curves.new(
+        f"LingBot Map {document.ready.result_id[-8:]} Camera Trajectory",
+        "CURVE",
+    )
+    created.curves.append(curve)
+    curve.dimensions = "3D"
+    curve.resolution_u = 1
+    spline = curve.splines.new("POLY")
+    spline.points.add(document.ready.frame_count - 1)
+    camera_positions = np.asarray(
+        document.arrays["camera_to_world"][:, :3, 3], dtype=np.float64
+    )
+    homogeneous = np.ones(
+        (document.ready.frame_count, 4), dtype=np.float64
+    )
+    homogeneous[:, :3] = camera_positions
+    spline.points.foreach_set("co", homogeneous.reshape(-1))
+    trajectory = bpy.data.objects.new("Camera Trajectory", curve)
+    created.objects.append(trajectory)
+    collection.objects.link(trajectory)
+    trajectory.parent = root_object
+    trajectory.hide_render = True
+    trajectory.show_in_front = True
+    return trajectory, curve
+
+
+def _remove_movieclip_if_unused(bpy: Any, clip: Any) -> None:
+    if clip is not None and clip.name in bpy.data.movieclips and clip.users == 0:
+        bpy.data.movieclips.remove(clip)
+
+
+def _load_source_clip(
+    bpy: Any,
+    document: ValidatedResult,
+    *,
+    current_blend_path: str | Path | None,
+    relink_path: str | Path | None = None,
+    cancel: CancelCheck | None = None,
+) -> tuple[Any, Path]:
+    contract = document.source_view
+    if contract is None:
+        raise SourceViewError("Source-view contract is unavailable")
+    source = document.manifest["source"]
+    errors: list[str] = []
+    media = None
+    for candidate in candidate_source_paths(
+        source,
+        current_blend_path=current_blend_path,
+        relink_path=relink_path,
+    ):
+        try:
+            media = validate_source_media(
+                candidate,
+                source,
+                cancel=(
+                    (lambda: (_cancelled(cancel, "source_background") or False))
+                    if cancel is not None
+                    else None
+                ),
+            )
+            break
+        except SourceViewError as exc:
+            errors.append(str(exc))
+    if media is None:
+        raise SourceViewError(
+            errors[-1] if errors else "Capture Source media is unavailable"
+        )
+    clip = None
+    try:
+        clip = bpy.data.movieclips.load(str(media), check_existing=False)
+        if tuple(int(value) for value in clip.size) != contract.coded_size:
+            raise SourceViewError(
+                "Capture Source coded dimensions disagree with Display Transform"
+            )
+        if int(clip.frame_duration) != document.ready.frame_count:
+            raise SourceViewError(
+                "Capture Source frame duration disagrees with the Result"
+            )
+        clip.frame_start = int(document.manifest["timeline_start"])
+        return clip, media
+    except ResultImportCancelled:
+        _remove_movieclip_if_unused(bpy, clip)
+        raise
+    except SourceViewError:
+        _remove_movieclip_if_unused(bpy, clip)
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        _remove_movieclip_if_unused(bpy, clip)
+        raise SourceViewError(
+            f"Capture Source could not be loaded as a supported MovieClip: {exc}"
+        ) from exc
+
+
+def _configure_background(
+    camera_data: Any,
+    clip: Any,
+    contract: SourceViewContract,
+) -> Any:
+    background = camera_data.background_images.new()
+    background.source = "MOVIE_CLIP"
+    background.clip = clip
+    background.use_camera_clip = False
+    background.frame_method = "FIT"
+    background.offset = (0.0, 0.0)
+    # FIT is evaluated before Blender rotates the coded movie. Compensate its
+    # aspect-derived shrink for quarter-turn and diagonal display transforms.
+    background.scale = background_scale(contract)
+    mapping = BACKGROUND_MAPPINGS[contract.display_transform]
+    background.rotation = mapping.rotation_radians
+    background.use_flip_x = mapping.flip_x
+    background.use_flip_y = mapping.flip_y
+    # Blender 5.2's BACK mode is occluded by the solid viewport background.
+    # FRONT is still a camera-only 2D overlay (not arbitrary 3D depth) and is
+    # required for the explicitly shown Source Background to be visible.
+    background.display_depth = "FRONT"
+    background.alpha = 1.0
+    background.show_background_image = False
+    camera_data.show_background_images = True
+    return background
+
+
+def _try_attach_source_background(
+    bpy: Any,
+    document: ValidatedResult,
+    scene: Any,
+    camera_data: Any,
+    created: _Created,
+    *,
+    cancel: CancelCheck | None,
+) -> tuple[str, str | None]:
+    contract = document.source_view
+    if contract is None:
+        return "unavailable-legacy-result", None
+    if not scene_aspect_matches(scene, contract):
+        return "unattached-scene-aspect-mismatch", None
+    try:
+        clip, media = _load_source_clip(
+            bpy,
+            document,
+            current_blend_path=getattr(bpy.data, "filepath", ""),
+            cancel=cancel,
+        )
+    except SourceViewError as exc:
+        return f"unattached-{exc}", None
+    created.movieclips.append(clip)
+    _configure_background(camera_data, clip, contract)
+    return "attached-hidden", str(media)
+
+
+def _source_view_properties(
+    document: ValidatedResult,
+    *,
+    background_status: str,
+    source_path: str | None,
+) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "lingbot_map_timeline_start": int(document.manifest["timeline_start"]),
+        "lingbot_map_frame_count": int(document.ready.frame_count),
+        "lingbot_map_source_json": json.dumps(
+            document.manifest["source"],
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "lingbot_map_source_background_status": background_status[:1024],
+        "lingbot_map_warnings_json": json.dumps(
+            document.manifest["warnings"],
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+    if document.source_view is not None:
+        values["lingbot_map_source_display_json"] = json.dumps(
+            document.manifest["source_display"],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        values["lingbot_map_model_coverage_json"] = json.dumps(
+            document.manifest["model_coverage"],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        values["lingbot_map_source_to_model_json"] = json.dumps(
+            np.asarray(document.arrays["source_to_model"]).tolist(),
+            separators=(",", ":"),
+        )
+    if source_path is not None:
+        values["lingbot_map_source_background_path"] = source_path
+    return values
+
+
 def _rollback(bpy: Any, created: _Created) -> None:
     # Objects first release their data and collection links. Shared compatible
     # shader groups are tracked only when this attempt uniquely created them.
@@ -1358,12 +1714,23 @@ def _rollback(bpy: Any, created: _Created) -> None:
     for item in reversed(created.pointclouds):
         if item.name in bpy.data.pointclouds and item.users == 0:
             bpy.data.pointclouds.remove(item)
+    for item in reversed(created.cameras):
+        if item.name in bpy.data.cameras and item.users == 0:
+            bpy.data.cameras.remove(item)
+    for item in reversed(created.curves):
+        if item.name in bpy.data.curves and item.users == 0:
+            bpy.data.curves.remove(item)
+    for item in reversed(created.movieclips):
+        _remove_movieclip_if_unused(bpy, item)
     for item in reversed(created.materials):
         if item.name in bpy.data.materials and item.users == 0:
             bpy.data.materials.remove(item)
     for item in reversed(created.node_groups):
         if item.name in bpy.data.node_groups and item.users == 0:
             bpy.data.node_groups.remove(item)
+    for item in reversed(created.actions):
+        if item.name in bpy.data.actions and item.users == 0:
+            bpy.data.actions.remove(item)
     for item in reversed(created.collections):
         if item.name in bpy.data.collections:
             bpy.data.collections.remove(item)
@@ -1421,6 +1788,7 @@ def import_result(
         bpy = bpy_module
         created = _Created.empty()
         committed = False
+        original_frame_end = int(scene.frame_end)
         try:
             _cancelled(cancel, "staging_collection")
             collection = bpy.data.collections.new(
@@ -1483,16 +1851,98 @@ def import_result(
             _new_geometry_nodes(
                 bpy, point_object, document, scene, created
             )
+            camera_object = None
+            camera_data = None
+            trajectory = None
+            trajectory_data = None
+            background_status = "unavailable-legacy-result"
+            background_path = None
+            _cancelled(cancel, "camera")
+            if document.source_view is not None:
+                camera_object, camera_data = _new_camera_animation(
+                    bpy,
+                    collection,
+                    root_object,
+                    document,
+                    scene,
+                    created,
+                )
+            _cancelled(cancel, "camera_animation")
+            _cancelled(cancel, "trajectory")
+            if document.source_view is not None:
+                trajectory, trajectory_data = _new_camera_trajectory(
+                    bpy,
+                    collection,
+                    root_object,
+                    document,
+                    created,
+                )
+            _cancelled(cancel, "source_background")
+            if camera_data is not None:
+                background_status, background_path = (
+                    _try_attach_source_background(
+                        bpy,
+                        document,
+                        scene,
+                        camera_data,
+                        created,
+                        cancel=cancel,
+                    )
+                )
             _cancelled(cancel, "ownership")
             _mark(
                 collection,
                 _metadata(document, scene, "reconstruction_collection"),
             )
+            _mark(
+                collection,
+                _source_view_properties(
+                    document,
+                    background_status=background_status,
+                    source_path=background_path,
+                ),
+            )
             _mark(root_object, _metadata(document, scene, "reconstruction_root"))
             _mark(point_object, _metadata(document, scene, "point_cloud"))
             _mark(pointcloud, _metadata(document, scene, "point_cloud_data"))
+            if camera_object is not None and camera_data is not None:
+                _mark(
+                    camera_object,
+                    _metadata(document, scene, "reconstruction_camera"),
+                )
+                _mark(
+                    camera_data,
+                    _metadata(document, scene, "reconstruction_camera_data"),
+                )
+                camera_data["lingbot_map_source_background_status"] = (
+                    background_status
+                )
+                camera_data["lingbot_map_source_background_playback"] = (
+                    "SEQUENTIAL_NON_CYCLING"
+                )
+                if background_path is not None:
+                    camera_data["lingbot_map_source_background_path"] = (
+                        background_path
+                    )
+            if trajectory is not None and trajectory_data is not None:
+                _mark(
+                    trajectory,
+                    _metadata(document, scene, "camera_trajectory"),
+                )
+                _mark(
+                    trajectory_data,
+                    _metadata(document, scene, "camera_trajectory_data"),
+                )
             _cancelled(cancel, "commit")
             scene.collection.children.link(collection)
+            if document.source_view is not None:
+                last_frame = (
+                    int(document.manifest["timeline_start"])
+                    + document.ready.frame_count
+                    - 1
+                )
+                if scene.frame_end < last_frame:
+                    scene.frame_end = last_frame
             committed = True
             _select_existing(collection, context)
             outcome = ImportOutcome(
@@ -1506,10 +1956,374 @@ def import_result(
             return outcome
         except Exception:
             if not committed:
+                if scene.frame_end != original_frame_end:
+                    scene.frame_end = original_frame_end
                 _rollback(bpy, created)
             raise
     finally:
         _import_running = False
+
+
+def _json_property(
+    collection: Any, name: str, expected_type: type
+) -> Any:
+    raw = collection.get(name)
+    if not isinstance(raw, str) or not raw or len(raw) > 1024 * 1024:
+        raise ResultImportError(f"Imported source-view metadata is missing: {name}")
+    try:
+        value = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ResultImportError(
+            f"Imported source-view metadata is invalid: {name}"
+        ) from exc
+    if not isinstance(value, expected_type):
+        raise ResultImportError(
+            f"Imported source-view metadata has the wrong type: {name}"
+        )
+    return value
+
+
+def imported_source_view_contract(collection: Any) -> SourceViewContract:
+    manifest = {
+        "source_display": _json_property(
+            collection, "lingbot_map_source_display_json", dict
+        ),
+        "model_coverage": _json_property(
+            collection, "lingbot_map_model_coverage_json", dict
+        ),
+    }
+    source_to_model = _json_property(
+        collection, "lingbot_map_source_to_model_json", list
+    )
+    try:
+        contract = validate_source_view_contract(manifest, source_to_model)
+    except SourceViewError as exc:
+        raise ResultImportError(str(exc)) from exc
+    if contract is None:
+        raise ResultImportError("Imported Result has no source-view contract")
+    return contract
+
+
+def find_reconstruction_camera(collection: Any) -> Any:
+    matches = [
+        item
+        for item in collection.objects
+        if item.get("lingbot_map_kind") == "reconstruction_camera"
+        and getattr(item, "type", None) == "CAMERA"
+    ]
+    if len(matches) != 1:
+        raise ResultImportError(
+            "Imported Result does not own exactly one Reconstruction Camera"
+        )
+    return matches[0]
+
+
+def _load_imported_source_clip(
+    bpy: Any,
+    collection: Any,
+    contract: SourceViewContract,
+    *,
+    relink_path: str | Path | None = None,
+) -> tuple[Any, Path]:
+    source = _json_property(collection, "lingbot_map_source_json", dict)
+    preferred = relink_path or collection.get(
+        "lingbot_map_relinked_source_path"
+    )
+    errors: list[str] = []
+    media = None
+    candidates = (
+        (Path(os.path.abspath(relink_path)),)
+        if relink_path is not None
+        else candidate_source_paths(
+            source,
+            current_blend_path=getattr(bpy.data, "filepath", ""),
+            relink_path=preferred,
+        )
+    )
+    for candidate in candidates:
+        try:
+            media = validate_source_media(candidate, source)
+            break
+        except SourceViewError as exc:
+            errors.append(str(exc))
+    if media is None:
+        raise ResultImportError(
+            errors[-1] if errors else "Capture Source media is unavailable"
+        )
+    frame_count = collection.get("lingbot_map_frame_count")
+    timeline_start = collection.get("lingbot_map_timeline_start")
+    if (
+        isinstance(frame_count, bool)
+        or not isinstance(frame_count, int)
+        or frame_count < 1
+        or isinstance(timeline_start, bool)
+        or not isinstance(timeline_start, int)
+    ):
+        raise ResultImportError(
+            "Imported source-view timeline metadata is invalid"
+        )
+    clip = None
+    try:
+        clip = bpy.data.movieclips.load(str(media), check_existing=False)
+        if tuple(int(value) for value in clip.size) != contract.coded_size:
+            raise ResultImportError(
+                "Capture Source coded dimensions disagree with Display Transform"
+            )
+        if int(clip.frame_duration) != frame_count:
+            raise ResultImportError(
+                "Capture Source frame duration disagrees with the Result"
+            )
+        clip.frame_start = timeline_start
+        return clip, media
+    except ResultImportError:
+        _remove_movieclip_if_unused(bpy, clip)
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        _remove_movieclip_if_unused(bpy, clip)
+        raise ResultImportError(
+            f"Capture Source could not be loaded as a supported MovieClip: {exc}"
+        ) from exc
+
+
+def _replace_camera_background(
+    bpy: Any,
+    camera_data: Any,
+    clip: Any,
+    contract: SourceViewContract,
+) -> None:
+    old_backgrounds = tuple(camera_data.background_images)
+    old_clips = tuple(
+        item.clip
+        for item in old_backgrounds
+        if item.source == "MOVIE_CLIP" and item.clip is not None
+    )
+    new_background = None
+    try:
+        new_background = _configure_background(camera_data, clip, contract)
+        for background in old_backgrounds:
+            camera_data.background_images.remove(background)
+        for old_clip in old_clips:
+            _remove_movieclip_if_unused(bpy, old_clip)
+    except Exception:
+        if (
+            new_background is not None
+            and new_background in camera_data.background_images[:]
+        ):
+            camera_data.background_images.remove(new_background)
+        _remove_movieclip_if_unused(bpy, clip)
+        raise
+
+
+def set_scene_resolution_to_source(
+    collection: Any,
+    scene: Any,
+    *,
+    bpy_module: Any | None = None,
+) -> str:
+    """Explicitly revalidate media, set exact source resolution, and attach."""
+
+    if bpy_module is None:
+        import bpy as bpy_module  # type: ignore[import-not-found]
+    bpy = bpy_module
+    contract = imported_source_view_contract(collection)
+    camera = find_reconstruction_camera(collection)
+    clip, media = _load_imported_source_clip(bpy, collection, contract)
+    render = scene.render
+    previous = (
+        int(render.resolution_x),
+        int(render.resolution_y),
+        int(render.resolution_percentage),
+        float(render.pixel_aspect_x),
+        float(render.pixel_aspect_y),
+    )
+    try:
+        render.resolution_x = contract.width
+        render.resolution_y = contract.height
+        render.resolution_percentage = 100
+        render.pixel_aspect_x = 1.0
+        render.pixel_aspect_y = 1.0
+        if not scene_aspect_matches(scene, contract):
+            raise ResultImportError(
+                "Scene rejected the exact source-display aspect"
+            )
+        _replace_camera_background(bpy, camera.data, clip, contract)
+    except Exception:
+        (
+            render.resolution_x,
+            render.resolution_y,
+            render.resolution_percentage,
+            render.pixel_aspect_x,
+            render.pixel_aspect_y,
+        ) = previous
+        _remove_movieclip_if_unused(bpy, clip)
+        raise
+    collection["lingbot_map_source_background_status"] = "attached-hidden"
+    collection["lingbot_map_source_background_path"] = str(media)
+    camera.data["lingbot_map_source_background_status"] = "attached-hidden"
+    camera.data["lingbot_map_source_background_path"] = str(media)
+    return (
+        f"Scene Resolution set to {contract.width} × {contract.height}; "
+        "Source Background attached and hidden"
+    )
+
+
+def relink_source_background(
+    collection: Any,
+    scene: Any,
+    path: str | Path,
+    *,
+    bpy_module: Any | None = None,
+) -> str:
+    """Accept a replacement path only after checksum, media, and mapping gates."""
+
+    if bpy_module is None:
+        import bpy as bpy_module  # type: ignore[import-not-found]
+    bpy = bpy_module
+    contract = imported_source_view_contract(collection)
+    camera = find_reconstruction_camera(collection)
+    clip, media = _load_imported_source_clip(
+        bpy, collection, contract, relink_path=path
+    )
+    if scene_aspect_matches(scene, contract):
+        _replace_camera_background(bpy, camera.data, clip, contract)
+        status = "attached-hidden"
+        message = "Capture Source relinked; background attached and hidden"
+    else:
+        _remove_movieclip_if_unused(bpy, clip)
+        status = "verified-unattached-scene-aspect-mismatch"
+        message = (
+            "Capture Source checksum verified; use Set Scene Resolution to "
+            "Source before attachment"
+        )
+    collection["lingbot_map_relinked_source_path"] = str(media)
+    collection["lingbot_map_source_background_status"] = status
+    collection["lingbot_map_source_background_path"] = str(media)
+    camera.data["lingbot_map_source_background_status"] = status
+    camera.data["lingbot_map_source_background_path"] = str(media)
+    return message
+
+
+def set_source_background_visibility(
+    collection: Any, visible: bool
+) -> str:
+    camera = find_reconstruction_camera(collection)
+    backgrounds = tuple(camera.data.background_images)
+    if len(backgrounds) != 1 or backgrounds[0].source != "MOVIE_CLIP":
+        raise ResultImportError(
+            "Source Background is not attached; revalidate resolution or relink"
+        )
+    camera.data.show_background_images = True
+    backgrounds[0].show_background_image = bool(visible)
+    return "Source Background shown" if visible else "Source Background hidden"
+
+
+_coverage_guides: dict[int, tuple[Any, Any]] = {}
+
+
+def _draw_coverage_guide(
+    area: Any,
+    region: Any,
+    scene: Any,
+    camera: Any,
+    contract: SourceViewContract,
+) -> None:
+    try:
+        space = area.spaces.active
+        region_3d = space.region_3d
+        if (
+            area.type != "VIEW_3D"
+            or region_3d.view_perspective != "CAMERA"
+            or scene.camera != camera
+        ):
+            return
+        from bpy_extras.view3d_utils import location_3d_to_region_2d
+        from gpu_extras.batch import batch_for_shader
+        import gpu
+
+        projected = []
+        for corner in camera.data.view_frame(scene=scene):
+            point = location_3d_to_region_2d(
+                region, region_3d, camera.matrix_world @ corner
+            )
+            if point is None:
+                return
+            projected.append((float(point.x), float(point.y)))
+        border = (
+            min(point[0] for point in projected),
+            min(point[1] for point in projected),
+            max(point[0] for point in projected),
+            max(point[1] for point in projected),
+        )
+        polygon = coverage_to_camera_border(contract, border)
+        vertices = tuple(
+            polygon[index]
+            for edge in ((0, 1), (1, 2), (2, 3), (3, 0))
+            for index in edge
+        )
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+        batch = batch_for_shader(shader, "LINES", {"pos": vertices})
+        gpu.state.blend_set("ALPHA")
+        gpu.state.line_width_set(2.0)
+        shader.bind()
+        shader.uniform_float("color", (1.0, 0.35, 0.05, 0.95))
+        batch.draw(shader)
+        gpu.state.line_width_set(1.0)
+        gpu.state.blend_set("NONE")
+    except (ReferenceError, RuntimeError, SourceViewError):
+        return
+
+
+def toggle_model_coverage_guide(
+    context: Any, collection: Any
+) -> bool:
+    """Toggle one temporary POST_PIXEL guide; no Result/datablock is mutated."""
+
+    area = getattr(context, "area", None)
+    region = getattr(context, "region", None)
+    if (
+        area is None
+        or region is None
+        or area.type != "VIEW_3D"
+        or region.type != "WINDOW"
+    ):
+        raise ResultImportError(
+            "Model Coverage guide requires a 3D View window region"
+        )
+    key = int(area.as_pointer())
+    existing = _coverage_guides.pop(key, None)
+    if existing is not None:
+        import bpy
+
+        bpy.types.SpaceView3D.draw_handler_remove(existing[0], "WINDOW")
+        area.tag_redraw()
+        return False
+    contract = imported_source_view_contract(collection)
+    camera = find_reconstruction_camera(collection)
+    import bpy
+
+    handler = bpy.types.SpaceView3D.draw_handler_add(
+        _draw_coverage_guide,
+        (area, region, context.scene, camera, contract),
+        "WINDOW",
+        "POST_PIXEL",
+    )
+    _coverage_guides[key] = (handler, area)
+    area.tag_redraw()
+    return True
+
+
+def clear_model_coverage_guides() -> None:
+    if not _coverage_guides:
+        return
+    import bpy
+
+    while _coverage_guides:
+        _key, (handler, area) = _coverage_guides.popitem()
+        try:
+            bpy.types.SpaceView3D.draw_handler_remove(handler, "WINDOW")
+            area.tag_redraw()
+        except (ReferenceError, RuntimeError):
+            continue
 
 
 _auto_attempted: set[tuple[str, str]] = set()
@@ -1600,8 +2414,15 @@ __all__ = [
     "attempt_auto_import_once",
     "available_physical_memory",
     "evaluate_import_capacity",
+    "clear_model_coverage_guides",
+    "find_reconstruction_camera",
     "get_import_status",
     "import_result",
+    "imported_source_view_contract",
+    "relink_source_background",
     "set_import_status",
+    "set_scene_resolution_to_source",
+    "set_source_background_visibility",
+    "toggle_model_coverage_guide",
     "validate_result",
 ]

@@ -73,6 +73,8 @@ class ResultBuildRequest:
     warnings: tuple[Mapping[str, str], ...] = ()
     created_utc: str | None = None
     result_id: str | None = None
+    source_display: Mapping[str, Any] | None = None
+    model_coverage: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +109,8 @@ class IncrementalResultRequest:
     created_utc: str | None = None
     result_id: str | None = None
     model_grid_shape: tuple[int, int] | None = None
+    source_display: Mapping[str, Any] | None = None
+    model_coverage: Mapping[str, Any] | None = None
 
 
 PredictionDecoder = Callable[[Any, Any, float], AlignedPrediction]
@@ -146,6 +150,46 @@ def _validate_profile(profile: ResultProfile) -> None:
             raise ResultPipelineError(f"{label} must be in [0,100]")
     if not isinstance(profile.retain_dense_predictions, bool):
         raise ResultPipelineError("Dense Predictions retention must be boolean")
+
+
+def _source_intrinsics_warnings(
+    source_intrinsics: np.ndarray,
+) -> tuple[Mapping[str, str], ...]:
+    """Record material calibration discontinuities without altering intrinsics."""
+
+    values = source_intrinsics.astype(np.float64, copy=False)
+    fx = values[:, 0, 0]
+    fy = values[:, 1, 1]
+    axis_indices = np.flatnonzero(np.abs(fx - fy) / np.maximum(fx, fy) > 0.05)
+    jump_indices = (
+        np.flatnonzero(np.abs(np.diff(fx)) / fx[:-1] > 0.05) + 1
+        if len(fx) > 1
+        else np.empty((0,), dtype=np.int64)
+    )
+    warnings: list[Mapping[str, str]] = []
+    if len(axis_indices):
+        warnings.append(
+            {
+                "code": "source-intrinsics-axis-disagreement",
+                "message": (
+                    f"{len(axis_indices)} frame(s) differ by more than 5% "
+                    f"between source-display fx and fy; first frame "
+                    f"{int(axis_indices[0])}. The exact horizontal mapping was retained."
+                ),
+            }
+        )
+    if len(jump_indices):
+        warnings.append(
+            {
+                "code": "source-focal-discontinuity",
+                "message": (
+                    f"{len(jump_indices)} adjacent source-display focal jump(s) "
+                    f"exceed 5%; first frame {int(jump_indices[0])}. "
+                    "Per-frame values were retained without smoothing."
+                ),
+            }
+        )
+    return tuple(warnings)
 
 
 def _validate_predictions(
@@ -380,10 +424,15 @@ def build_reconstruction_result(
         source=request.source,
         profile=profile,
         provenance=request.provenance,
-        warnings=request.warnings,
+        warnings=(
+            *request.warnings,
+            *_source_intrinsics_warnings(arrays["source_intrinsics"]),
+        ),
         arrays=arrays,
         voxel_edge_length=reduced.edge_length,
         voxel_origin=(0.0, 0.0, 0.0),
+        source_display=request.source_display,
+        model_coverage=request.model_coverage,
         created_utc=request.created_utc,
         result_id=request.result_id,
     )
@@ -679,10 +728,13 @@ class IncrementalBundleResultSink:
                 *self.request.warnings,
                 *self.window_warnings,
                 *(sky_outcome.warnings if sky_outcome is not None else ()),
+                *_source_intrinsics_warnings(arrays["source_intrinsics"]),
             ),
             arrays=arrays,
             voxel_edge_length=reduced.edge_length,
             voxel_origin=(0.0, 0.0, 0.0),
+            source_display=self.request.source_display,
+            model_coverage=self.request.model_coverage,
             created_utc=self.request.created_utc,
             result_id=self.request.result_id,
             dense_component=dense_component,

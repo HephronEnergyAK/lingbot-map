@@ -267,7 +267,7 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
             preflight["color_standard"],
             preflight["color_range"],
         )
-        canonical_height, canonical_width, source_to_model, _coverage = canonical_geometry(
+        canonical_height, canonical_width, source_to_model, coverage = canonical_geometry(
             int(preflight["displayed_height"]), int(preflight["displayed_width"])
         )
         grid_pixels = canonical_height * canonical_width
@@ -459,6 +459,29 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
                 warnings=warnings,
                 created_utc=datetime.now(timezone.utc).isoformat(),
                 model_grid_shape=(canonical_height, canonical_width),
+                source_display={
+                    "width": int(preflight["displayed_width"]),
+                    "height": int(preflight["displayed_height"]),
+                    "display_transform": preflight["display_transform"],
+                },
+                model_coverage={
+                    "coordinate_space": "source-display-pixel-edges",
+                    "polygon": [
+                        [float(x), float(y)] for x, y in coverage
+                    ],
+                    "source_fraction": float(
+                        (
+                            (coverage[1][0] - coverage[0][0])
+                            * (coverage[2][1] - coverage[1][1])
+                        )
+                        / (
+                            int(preflight["displayed_width"])
+                            * int(preflight["displayed_height"])
+                        )
+                    ),
+                    "model_width": canonical_width,
+                    "model_height": canonical_height,
+                },
             ),
             prediction_decoder=(
                 TorchPredictionDecoder()

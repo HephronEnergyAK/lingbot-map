@@ -31,6 +31,8 @@
         "sha256": {"$ref": "#/$defs/sha256"}
       }
     },
+    "source_display": {"$ref": "#/$defs/source_display"},
+    "model_coverage": {"$ref": "#/$defs/model_coverage"},
     "contracts": {
       "type": "object", "additionalProperties": false,
       "required": ["job_spec", "events", "result"],
@@ -85,6 +87,43 @@
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_display": {
+      "type": "object", "additionalProperties": false,
+      "required": ["width", "height", "display_transform"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "display_transform": {
+          "enum": [
+            "identity",
+            "rotate_90_ccw",
+            "rotate_180",
+            "rotate_270_ccw",
+            "reflect_x",
+            "reflect_y",
+            "reflect_main_diagonal",
+            "reflect_anti_diagonal"
+          ]
+        }
+      }
+    },
+    "model_coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["coordinate_space", "polygon", "source_fraction", "model_width", "model_height"],
+      "properties": {
+        "coordinate_space": {"const": "source-display-pixel-edges"},
+        "polygon": {
+          "type": "array", "minItems": 4, "maxItems": 4,
+          "items": {
+            "type": "array", "minItems": 2, "maxItems": 2,
+            "items": {"type": "number"}
+          }
+        },
+        "source_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "model_width": {"type": "integer", "minimum": 1},
+        "model_height": {"type": "integer", "minimum": 1}
+      }
+    },
     "safe_path": {"type": "string", "minLength": 1, "maxLength": 32767, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"},
     "file": {
       "type": "object", "additionalProperties": false, "required": ["path", "byte_length", "sha256"],

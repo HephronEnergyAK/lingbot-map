@@ -17,8 +17,13 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MANAGED_ROOT = Path(r"C:\tmp\lingbot-map-runtime-issue4-final")
-PROJECT_DIR = Path(r"C:\tmp\lingbot-map-blender-result14") / f"run-{os.getpid()}"
+MANAGED_ROOT = Path(
+    os.environ.get(
+        "LINGBOT_MAP_TEST_MANAGED_ROOT",
+        r"C:\tmp\lingbot-map-runtime-issue4-final",
+    )
+)
+PROJECT_DIR = Path(r"C:\tmp\lingbot-map-blender-result") / f"run-{os.getpid()}"
 SCENE_UUID = "12345678-1234-4321-8765-123456789abc"
 
 

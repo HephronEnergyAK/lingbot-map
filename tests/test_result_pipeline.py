@@ -314,6 +314,57 @@ class SafeBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ResultBundleError, "64 KiB"):
                 validate_npy_file(path, ArrayContract("<f4", (1,)))
 
+    def test_source_display_and_model_coverage_are_cross_validated(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ResultFixture(Path(temporary))
+            source_to_model = np.array(
+                ((259.0, 0.0, 0.0), (0.0, 259.0, 0.0), (0.0, 0.0, 1.0)),
+                dtype="<f8",
+            )
+            fixture.request = ResultBuildRequest(
+                **{
+                    **fixture.request.__dict__,
+                    "source_to_model": source_to_model,
+                    "source_display": {
+                        "width": 2,
+                        "height": 2,
+                        "display_transform": "reflect_anti_diagonal",
+                    },
+                    "model_coverage": {
+                        "coordinate_space": "source-display-pixel-edges",
+                        "polygon": [
+                            [0.0, 0.0],
+                            [2.0, 0.0],
+                            [2.0, 2.0],
+                            [0.0, 2.0],
+                        ],
+                        "source_fraction": 1.0,
+                        "model_width": 518,
+                        "model_height": 518,
+                    },
+                }
+            )
+            result = fixture.build().published.directory
+            manifest_path = result / "manifest.json"
+            original = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                original["source_display"]["display_transform"],
+                "reflect_anti_diagonal",
+            )
+            validate_result_bundle(result)
+
+            invalid = copy.deepcopy(original)
+            invalid["model_coverage"]["polygon"][2][1] = 1.5
+            atomic_write_json(manifest_path, invalid)
+            with self.assertRaisesRegex(ResultBundleError, "source_to_model"):
+                validate_result_bundle(result)
+
+            missing_pair = copy.deepcopy(original)
+            del missing_pair["model_coverage"]
+            atomic_write_json(manifest_path, missing_pair)
+            with self.assertRaisesRegex(ResultBundleError, "present together"):
+                validate_result_bundle(result)
+
     def test_manifest_checksum_cross_semantics_and_undeclared_files_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             fixture = ResultFixture(Path(temporary))

@@ -23,7 +23,7 @@
       "id": "reconstruction-result",
       "version": "1.0.0",
       "path": "reconstruction-result.schema.json",
-      "sha256": "c3e3da692704b1399c422d8b72d7d691cd512d184809f1f4dcf4b2da9875620f"
+      "sha256": "44bf0f4a0b8540889e18ea70d977324229d935e53663685b445ceae399c7fb6b"
     },
     {
       "id": "dense-predictions",

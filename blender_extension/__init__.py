@@ -31,6 +31,7 @@ from .job_lifecycle import (
     report_job_recovery_error,
 )
 from .result_import import (
+    clear_model_coverage_guides,
     ImportCapacityError,
     ResultImportError,
     attempt_auto_import_once,
@@ -78,6 +79,7 @@ def _persistent(function):
 
 @_persistent
 def _recover_jobs_after_load(_unused) -> None:
+    clear_model_coverage_guides()
     filepath = getattr(bpy.data, "filepath", "")
     if filepath:
         try:
@@ -224,6 +226,7 @@ def unregister() -> None:
     cancel_model_setup()
     shutdown_gpu_capability()
     detach_job_monitor()
+    clear_model_coverage_guides()
     _unregister_scene_property()
     handlers = getattr(bpy.app, "handlers", None)
     timers = getattr(bpy.app, "timers", None)

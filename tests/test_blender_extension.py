@@ -284,6 +284,11 @@ class RegistrationTests(unittest.TestCase):
                 "lingbot_map.run_reconstruction_job",
                 "lingbot_map.cancel_active_job",
                 "lingbot_map.import_result",
+                "lingbot_map.use_reconstruction_camera",
+                "lingbot_map.set_resolution_to_source",
+                "lingbot_map.relink_source_background",
+                "lingbot_map.source_background_visibility",
+                "lingbot_map.toggle_model_coverage",
             ],
         )
         self.assertEqual([panel.bl_order for panel in panels], [0, 1, 2, 3, 4])

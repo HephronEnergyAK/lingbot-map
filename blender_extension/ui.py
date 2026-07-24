@@ -53,8 +53,13 @@ from .result_import import (
     ResultImportCancelled,
     ResultImportError,
     get_import_status,
+    find_reconstruction_camera,
     import_result,
+    relink_source_background,
     set_import_status,
+    set_scene_resolution_to_source,
+    set_source_background_visibility,
+    toggle_model_coverage_guide,
 )
 
 
@@ -544,6 +549,172 @@ class LINGBOTMAP_OT_import_result(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _imported_reconstruction_collections(scene):
+    found = []
+    pending = list(scene.collection.children)
+    while pending:
+        collection = pending.pop()
+        pending.extend(collection.children)
+        if (
+            collection.get("lingbot_map_kind")
+            == "reconstruction_collection"
+            and collection.get("lingbot_map_owner_schema") == "1.0.0"
+        ):
+            found.append(collection)
+    return tuple(found)
+
+
+def _imported_collection(scene, result_id):
+    matches = [
+        collection
+        for collection in _imported_reconstruction_collections(scene)
+        if collection.get("lingbot_map_result_id") == result_id
+    ]
+    if len(matches) != 1:
+        raise ResultImportError(
+            "Scene does not contain exactly one owned Collection for this Result"
+        )
+    return matches[0]
+
+
+class LINGBOTMAP_OT_use_reconstruction_camera(bpy.types.Operator):
+    bl_idname = "lingbot_map.use_reconstruction_camera"
+    bl_label = "Use Reconstruction Camera"
+    bl_description = (
+        "Explicitly make this imported camera the Scene camera for inspection"
+    )
+
+    result_id: StringProperty(options={"HIDDEN"})
+
+    def execute(self, context):
+        try:
+            collection = _imported_collection(
+                context.scene, self.result_id
+            )
+            context.scene.camera = find_reconstruction_camera(collection)
+            if (
+                getattr(context, "area", None) is not None
+                and context.area.type == "VIEW_3D"
+            ):
+                context.space_data.region_3d.view_perspective = "CAMERA"
+        except (ResultImportError, AttributeError, RuntimeError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Reconstruction Camera is active for inspection")
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_set_resolution_to_source(bpy.types.Operator):
+    bl_idname = "lingbot_map.set_resolution_to_source"
+    bl_label = "Set Scene Resolution to Source"
+    bl_description = (
+        "Revalidate source identity and alignment, then explicitly set exact "
+        "display dimensions without changing FPS"
+    )
+
+    result_id: StringProperty(options={"HIDDEN"})
+
+    def invoke(self, context, _event):
+        return context.window_manager.invoke_confirm(self, _event)
+
+    def execute(self, context):
+        try:
+            collection = _imported_collection(
+                context.scene, self.result_id
+            )
+            message = set_scene_resolution_to_source(
+                collection, context.scene
+            )
+        except (ResultImportError, OSError, RuntimeError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_relink_source_background(bpy.types.Operator):
+    bl_idname = "lingbot_map.relink_source_background"
+    bl_label = "Relink Source Background"
+    bl_description = (
+        "Choose an MP4 or MOV; only the exact checksum recorded by the Result "
+        "is accepted"
+    )
+
+    result_id: StringProperty(options={"HIDDEN"})
+    filepath: StringProperty(
+        name="Capture Source", subtype="FILE_PATH", default=""
+    )
+    filter_glob: StringProperty(
+        default="*.mp4;*.mov", options={"HIDDEN"}
+    )
+
+    def invoke(self, context, _event):
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        try:
+            collection = _imported_collection(
+                context.scene, self.result_id
+            )
+            message = relink_source_background(
+                collection, context.scene, self.filepath
+            )
+        except (ResultImportError, OSError, RuntimeError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_source_background_visibility(bpy.types.Operator):
+    bl_idname = "lingbot_map.source_background_visibility"
+    bl_label = "Set Source Background Visibility"
+
+    result_id: StringProperty(options={"HIDDEN"})
+    visible: BoolProperty(default=False, options={"HIDDEN"})
+
+    def execute(self, context):
+        try:
+            collection = _imported_collection(
+                context.scene, self.result_id
+            )
+            message = set_source_background_visibility(
+                collection, self.visible
+            )
+        except (ResultImportError, RuntimeError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_toggle_model_coverage(bpy.types.Operator):
+    bl_idname = "lingbot_map.toggle_model_coverage"
+    bl_label = "Toggle Model Crop Guide"
+    bl_description = (
+        "Toggle a temporary non-rendering Camera View overlay; no datablock "
+        "or Result file is changed"
+    )
+
+    result_id: StringProperty(options={"HIDDEN"})
+
+    def execute(self, context):
+        try:
+            collection = _imported_collection(
+                context.scene, self.result_id
+            )
+            shown = toggle_model_coverage_guide(context, collection)
+        except (ResultImportError, RuntimeError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"},
+            "Model Crop Guide shown" if shown else "Model Crop Guide hidden",
+        )
+        return {"FINISHED"}
+
+
 class _LINGBOTMAP_LifecyclePanel:
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -716,10 +887,16 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         blend_path = getattr(bpy.data, "filepath", "")
         scene_uuid = context.scene.get("lingbot_map_scene_uuid") if blend_path else None
         results = discover_ready_results(blend_path, scene_uuid=scene_uuid) if blend_path else ()
-        if not results:
+        imported = _imported_reconstruction_collections(context.scene)
+        imported_by_id = {
+            collection.get("lingbot_map_result_id"): collection
+            for collection in imported
+        }
+        if not results and not imported:
             self.layout.label(text="No Reconstruction Results discovered")
             return
         self.layout.label(text=get_import_status())
+        drawn_imported = set()
         for result in results:
             box = self.layout.box()
             box.label(text="Ready", icon="CHECKMARK")
@@ -761,6 +938,76 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                 icon="IMPORT",
             )
             action.result_directory = str(result.directory)
+            collection = imported_by_id.get(result.result_id)
+            if collection is not None:
+                drawn_imported.add(result.result_id)
+                self._draw_source_view(box, collection)
+        for collection in imported:
+            result_id = collection.get("lingbot_map_result_id")
+            if result_id in drawn_imported:
+                continue
+            box = self.layout.box()
+            box.label(text=f"Imported {result_id}", icon="CHECKMARK")
+            self._draw_source_view(box, collection)
+
+    @staticmethod
+    def _draw_source_view(box, collection):
+        result_id = str(collection.get("lingbot_map_result_id", ""))
+        if not collection.get("lingbot_map_source_display_json"):
+            box.label(
+                text="Legacy Result: source-aligned inspection unavailable",
+                icon="INFO",
+            )
+            return
+        start = int(collection.get("lingbot_map_timeline_start", 0))
+        count = int(collection.get("lingbot_map_frame_count", 0))
+        box.label(
+            text=f"Source-aligned frames: {start}–{start + max(0, count - 1)}"
+        )
+        status = str(
+            collection.get(
+                "lingbot_map_source_background_status", "unattached"
+            )
+        )
+        box.label(
+            text=f"Source Background: {status}",
+            icon="CHECKMARK" if status == "attached-hidden" else "INFO",
+        )
+        camera = box.operator(
+            LINGBOTMAP_OT_use_reconstruction_camera.bl_idname,
+            text="Use Reconstruction Camera",
+            icon="CAMERA_DATA",
+        )
+        camera.result_id = result_id
+        resolution = box.operator(
+            LINGBOTMAP_OT_set_resolution_to_source.bl_idname,
+            text="Set Scene Resolution to Source",
+        )
+        resolution.result_id = result_id
+        relink = box.operator(
+            LINGBOTMAP_OT_relink_source_background.bl_idname,
+            text="Relink Source Background",
+            icon="FILE_MOVIE",
+        )
+        relink.result_id = result_id
+        row = box.row(align=True)
+        show = row.operator(
+            LINGBOTMAP_OT_source_background_visibility.bl_idname,
+            text="Show Background",
+        )
+        show.result_id = result_id
+        show.visible = True
+        hide = row.operator(
+            LINGBOTMAP_OT_source_background_visibility.bl_idname,
+            text="Hide Background",
+        )
+        hide.result_id = result_id
+        hide.visible = False
+        guide = box.operator(
+            LINGBOTMAP_OT_toggle_model_coverage.bl_idname,
+            text="Toggle Model Crop Guide",
+        )
+        guide.result_id = result_id
 
 
 class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
@@ -787,6 +1034,11 @@ CLASSES = (
     LINGBOTMAP_OT_run_reconstruction_job,
     LINGBOTMAP_OT_cancel_active_job,
     LINGBOTMAP_OT_import_result,
+    LINGBOTMAP_OT_use_reconstruction_camera,
+    LINGBOTMAP_OT_set_resolution_to_source,
+    LINGBOTMAP_OT_relink_source_background,
+    LINGBOTMAP_OT_source_background_visibility,
+    LINGBOTMAP_OT_toggle_model_coverage,
     LINGBOTMAP_PT_setup,
     LINGBOTMAP_PT_reconstruct,
     LINGBOTMAP_PT_active_job,
