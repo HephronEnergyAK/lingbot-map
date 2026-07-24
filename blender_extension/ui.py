@@ -27,6 +27,12 @@ from .diagnostics import (
     export_portable_report,
     retain_extension_diagnostic,
 )
+from .localization import (
+    LocalizationError,
+    MANUAL_TOPICS,
+    open_manual,
+    translate as tr,
+)
 from .gpu_capability import (
     cancel_gpu_capability,
     discover_physical_gpus,
@@ -111,6 +117,15 @@ _project_inventory_pages = {
 _pending_lifecycle_plans: dict[str, tuple[str, ProjectLifecycle, LifecyclePlan]] = {}
 _permanent_delete_status = ""
 _project_inventory_error = ""
+
+
+def _draw_help(layout, topic: str) -> None:
+    action = layout.operator(
+        "lingbot_map.open_offline_help",
+        text="Help",
+        icon="HELP",
+    )
+    action.topic = topic
 
 
 def _project_key(blend_path: str) -> str:
@@ -226,14 +241,22 @@ def _draw_inventory_page_controls(
     if page > 0:
         previous = layout.operator(
             LINGBOTMAP_OT_load_more_project_items.bl_idname,
-            text=f"Previous {label} Page",
+            text=tr(
+                "Previous {label} Page",
+                bpy_module=bpy,
+                label=tr(label, bpy_module=bpy),
+            ),
         )
         previous.category = category
         previous.direction = "previous"
     if (page + 1) * 200 < total:
         following = layout.operator(
             LINGBOTMAP_OT_load_more_project_items.bl_idname,
-            text=f"Next {label} Page",
+            text=tr(
+                "Next {label} Page",
+                bpy_module=bpy,
+                label=tr(label, bpy_module=bpy),
+            ),
         )
         following.category = category
         following.direction = "next"
@@ -342,6 +365,28 @@ class LINGBOTMAP_Preferences(bpy.types.AddonPreferences):
         layout.prop(self, "runtime_root")
         layout.prop(self, "gpu_uuid")
         layout.prop(self, "offline_setup")
+        _draw_help(layout, "setup")
+
+
+class LINGBOTMAP_OT_open_offline_help(bpy.types.Operator):
+    bl_idname = "lingbot_map.open_offline_help"
+    bl_label = "Open Offline Help"
+    bl_description = (
+        "Open the matching packaged manual page without network access"
+    )
+
+    topic: StringProperty(options={"HIDDEN"})
+
+    def execute(self, _context):
+        if self.topic not in MANUAL_TOPICS:
+            self.report({"ERROR"}, "Unknown offline Help topic")
+            return {"CANCELLED"}
+        try:
+            outcome = open_manual(self.topic, bpy_module=bpy)
+        except (LocalizationError, OSError, RuntimeError, ValueError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return outcome if isinstance(outcome, set) else {"FINISHED"}
 
 
 class LINGBOTMAP_OT_setup_runtime(bpy.types.Operator):
@@ -858,7 +903,11 @@ class LINGBOTMAP_OT_repair_scene_uuid(bpy.types.Operator):
             return {"CANCELLED"}
         self.report(
             {"INFO"},
-            f"Repaired {len(repaired)} duplicate Scene IDs; save the .blend",
+            tr(
+                "Repaired {count} duplicate Scene IDs; save the .blend",
+                bpy_module=bpy,
+                count=len(repaired),
+            ),
         )
         return {"FINISHED"}
 
@@ -898,8 +947,20 @@ class LINGBOTMAP_OT_import_result_into(bpy.types.Operator):
             text="Confirm this explicit Result binding",
             icon="QUESTION",
         )
-        self.layout.label(text=f"Original: {self.confirmation_original}")
-        self.layout.label(text=f"Actual target: {self.confirmation_target}")
+        self.layout.label(
+            text=tr(
+                "Original: {value}",
+                bpy_module=bpy,
+                value=self.confirmation_original,
+            )
+        )
+        self.layout.label(
+            text=tr(
+                "Actual target: {value}",
+                bpy_module=bpy,
+                value=self.confirmation_target,
+            )
+        )
         self.layout.label(
             text="The original binding remains recorded and is not changed"
         )
@@ -983,7 +1044,11 @@ class LINGBOTMAP_OT_import_external_result(bpy.types.Operator):
             return {"CANCELLED"}
         self.report(
             {"INFO"},
-            outcome.message + "; external Result remains read-only on disk",
+            tr(
+                "{message}; external Result remains read-only on disk",
+                bpy_module=bpy,
+                message=outcome.message,
+            ),
         )
         return {"FINISHED"}
 
@@ -1077,7 +1142,12 @@ class LINGBOTMAP_OT_resolve_duplicate_imports(bpy.types.Operator):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         self.report(
-            {"INFO"}, f"Kept one managed instance; detached {detached} copies"
+            {"INFO"},
+            tr(
+                "Kept one managed instance; detached {count} copies",
+                bpy_module=bpy,
+                count=detached,
+            ),
         )
         return {"FINISHED"}
 
@@ -1111,9 +1181,27 @@ class LINGBOTMAP_OT_remove_result_version(bpy.types.Operator):
             text="Managed content may contain undetected user edits",
             icon="ERROR",
         )
-        self.layout.label(text=f"Collection: {self.inventory_name}")
-        self.layout.label(text=f"Objects: {self.inventory_objects}")
-        self.layout.label(text=f"Points: {self.inventory_points}")
+        self.layout.label(
+            text=tr(
+                "Collection: {name}",
+                bpy_module=bpy,
+                name=self.inventory_name,
+            )
+        )
+        self.layout.label(
+            text=tr(
+                "Objects: {count}",
+                bpy_module=bpy,
+                count=self.inventory_objects,
+            )
+        )
+        self.layout.label(
+            text=tr(
+                "Points: {count}",
+                bpy_module=bpy,
+                count=self.inventory_points,
+            )
+        )
         self.layout.label(
             text="Only uniquely owned Blender datablocks are deleted; disk data stays"
         )
@@ -1129,7 +1217,11 @@ class LINGBOTMAP_OT_remove_result_version(bpy.types.Operator):
             return {"CANCELLED"}
         self.report(
             {"INFO"},
-            f"Removed {inventory.collection_name}; shared data was preserved",
+            tr(
+                "Removed {name}; shared data was preserved",
+                bpy_module=bpy,
+                name=inventory.collection_name,
+            ),
         )
         return {"FINISHED"}
 
@@ -1298,7 +1390,14 @@ class LINGBOTMAP_OT_toggle_model_coverage(bpy.types.Operator):
             return {"CANCELLED"}
         self.report(
             {"INFO"},
-            "Model Crop Guide shown" if shown else "Model Crop Guide hidden",
+            tr(
+                (
+                    "Model Crop Guide shown"
+                    if shown
+                    else "Model Crop Guide hidden"
+                ),
+                bpy_module=bpy,
+            ),
         )
         return {"FINISHED"}
 
@@ -1426,15 +1525,28 @@ class LINGBOTMAP_OT_trash_result(bpy.types.Operator):
             text="Atomically move this owned Result to Project Trash?",
             icon="QUESTION",
         )
-        self.layout.label(text=f"Result: {self.result_id}")
         self.layout.label(
-            text=(
-                f"Items: {self.item_count} · files: {self.file_count} · "
-                f"bytes: {self.byte_count}"
+            text=tr(
+                "Result: {result_id}",
+                bpy_module=bpy,
+                result_id=self.result_id,
             )
         )
         self.layout.label(
-            text=f"Current Blender Collections: {self.collection_names}"
+            text=tr(
+                "Items: {items} · files: {files} · bytes: {bytes}",
+                bpy_module=bpy,
+                items=self.item_count,
+                files=self.file_count,
+                bytes=self.byte_count,
+            )
+        )
+        self.layout.label(
+            text=tr(
+                "Current Blender Collections: {names}",
+                bpy_module=bpy,
+                names=self.collection_names,
+            )
         )
         self.layout.label(
             text="Collections remain usable; their disk reference becomes unavailable"
@@ -1452,7 +1564,11 @@ class LINGBOTMAP_OT_trash_result(bpy.types.Operator):
             return {"CANCELLED"}
         self.report(
             {"INFO"},
-            f"Moved {outcome.item_count} Result to Project Trash",
+            tr(
+                "Moved {count} Result to Project Trash",
+                bpy_module=bpy,
+                count=outcome.item_count,
+            ),
         )
         return {"FINISHED"}
 
@@ -1491,11 +1607,20 @@ class LINGBOTMAP_OT_trash_dense(bpy.types.Operator):
             text="Move only Dense Predictions to Project Trash?",
             icon="QUESTION",
         )
-        self.layout.label(text=f"Result: {self.result_id}")
         self.layout.label(
-            text=(
-                f"Chunks: {self.chunk_count} · files: {self.file_count} · "
-                f"bytes: {self.byte_count}"
+            text=tr(
+                "Result: {result_id}",
+                bpy_module=bpy,
+                result_id=self.result_id,
+            )
+        )
+        self.layout.label(
+            text=tr(
+                "Chunks: {chunks} · files: {files} · bytes: {bytes}",
+                bpy_module=bpy,
+                chunks=self.chunk_count,
+                files=self.file_count,
+                bytes=self.byte_count,
             )
         )
         self.layout.label(text="The core Result and Blender content remain usable")
@@ -1562,9 +1687,20 @@ class LINGBOTMAP_OT_trash_diagnostic(bpy.types.Operator):
             text="Diagnostics are retained unless you explicitly confirm",
             icon="QUESTION",
         )
-        self.layout.label(text=f"Selected items: {self.item_count}")
         self.layout.label(
-            text=f"Files: {self.file_count} · bytes: {self.byte_count}"
+            text=tr(
+                "Selected items: {count}",
+                bpy_module=bpy,
+                count=self.item_count,
+            )
+        )
+        self.layout.label(
+            text=tr(
+                "Files: {files} · bytes: {bytes}",
+                bpy_module=bpy,
+                files=self.file_count,
+                bytes=self.byte_count,
+            )
         )
 
     def execute(self, _context):
@@ -1575,7 +1711,11 @@ class LINGBOTMAP_OT_trash_diagnostic(bpy.types.Operator):
             return {"CANCELLED"}
         self.report(
             {"INFO"},
-            f"Moved {outcome.item_count} Diagnostics to Project Trash",
+            tr(
+                "Moved {count} Diagnostics to Project Trash",
+                bpy_module=bpy,
+                count=outcome.item_count,
+            ),
         )
         return {"FINISHED"}
 
@@ -1649,6 +1789,7 @@ class LINGBOTMAP_OT_export_diagnostic_report(bpy.types.Operator):
                 text="This one report will contain sensitive local identity",
                 icon="ERROR",
             )
+        _draw_help(self.layout, "diagnostics")
 
     def execute(self, _context):
         try:
@@ -1661,14 +1802,21 @@ class LINGBOTMAP_OT_export_diagnostic_report(bpy.types.Operator):
         except (DiagnosticReportError, OSError, ValueError) as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        message = (
+            "Exported redacted Diagnostic Report ({bytes} bytes)"
+            if not self.include_sensitive_identity
+            else (
+                "Exported explicitly unredacted Diagnostic Report "
+                "({bytes} bytes)"
+            )
+        )
         self.report(
             {"INFO"},
-            (
-                "Exported redacted Diagnostic Report"
-                if not self.include_sensitive_identity
-                else "Exported explicitly unredacted Diagnostic Report"
-            )
-            + f" ({outcome['length']} bytes)",
+            tr(
+                message,
+                bpy_module=bpy,
+                bytes=outcome["length"],
+            ),
         )
         return {"FINISHED"}
 
@@ -1729,8 +1877,21 @@ class LINGBOTMAP_OT_restore_trash(bpy.types.Operator):
             text="Restore this exact validated Trash item?",
             icon="QUESTION",
         )
-        self.layout.label(text=f"Files: {self.file_count} · bytes: {self.byte_count}")
-        self.layout.label(text=f"Destination: {self.destination}")
+        self.layout.label(
+            text=tr(
+                "Files: {files} · bytes: {bytes}",
+                bpy_module=bpy,
+                files=self.file_count,
+                bytes=self.byte_count,
+            )
+        )
+        self.layout.label(
+            text=tr(
+                "Destination: {path}",
+                bpy_module=bpy,
+                path=self.destination,
+            )
+        )
         self.layout.label(text="Existing destinations are never overwritten")
 
     def execute(self, _context):
@@ -1781,9 +1942,12 @@ class LINGBOTMAP_OT_delete_trash(bpy.types.Operator):
             icon="ERROR",
         )
         self.layout.label(
-            text=(
-                f"Items: {self.item_count} · files: {self.file_count} · "
-                f"bytes: {self.byte_count}"
+            text=tr(
+                "Items: {items} · files: {files} · bytes: {bytes}",
+                bpy_module=bpy,
+                items=self.item_count,
+                files=self.file_count,
+                bytes=self.byte_count,
             )
         )
         self.layout.prop(self, "confirmation")
@@ -1807,8 +1971,11 @@ class LINGBOTMAP_OT_delete_trash(bpy.types.Operator):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         _permanent_delete_status = (
-            f"Deleting {plan.file_count} inspected file(s); Esc cancels "
-            "between files"
+            tr(
+                "Deleting {files} inspected file(s); Esc cancels between files",
+                bpy_module=bpy,
+                files=plan.file_count,
+            )
         )
         self._timer = context.window_manager.event_timer_add(
             0.01, window=context.window
@@ -1830,9 +1997,17 @@ class LINGBOTMAP_OT_delete_trash(bpy.types.Operator):
             self._remove_timer(context)
             refresh_project_inventory(str(bpy.data.filepath))
             _permanent_delete_status = (
-                "Permanent deletion cancelled; inspect partial_delete items"
-                if partial
-                else "Permanent deletion cancelled before changing Trash"
+                tr(
+                    (
+                        "Permanent deletion cancelled; inspect partial_delete items"
+                        if partial
+                        else (
+                            "Permanent deletion cancelled before changing "
+                            "Trash"
+                        )
+                    ),
+                    bpy_module=bpy,
+                )
             )
             self._session = None
             return {"CANCELLED"}
@@ -1855,15 +2030,23 @@ class LINGBOTMAP_OT_delete_trash(bpy.types.Operator):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         _permanent_delete_status = (
-            f"Permanent deletion: {self._session.completed_files}/"
-            f"{self._session.total_files} files"
+            tr(
+                "Permanent deletion: {completed}/{total} files",
+                bpy_module=bpy,
+                completed=self._session.completed_files,
+                total=self._session.total_files,
+            )
         )
         if outcome is None:
             return {"RUNNING_MODAL"}
         self._remove_timer(context)
         refresh_project_inventory(str(bpy.data.filepath))
         _permanent_delete_status = (
-            f"Permanently deleted {outcome.item_count} Trash item(s)"
+            tr(
+                "Permanently deleted {items} Trash item(s)",
+                bpy_module=bpy,
+                items=outcome.item_count,
+            )
         )
         self._session = None
         self.report({"INFO"}, _permanent_delete_status)
@@ -1894,10 +2077,13 @@ class _LINGBOTMAP_LifecyclePanel:
         if decision is None:
             layout.label(text="Host support has not been evaluated", icon="ERROR")
         elif decision.supported:
-            layout.label(text=decision.message, icon="CHECKMARK")
+            layout.label(
+                text=tr(decision.message, bpy_module=bpy),
+                icon="CHECKMARK",
+            )
         else:
             layout.label(text="Unsupported Host", icon="ERROR")
-            layout.label(text=decision.message)
+            layout.label(text=tr(decision.message, bpy_module=bpy))
 
 
 class LINGBOTMAP_PT_setup(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
@@ -1907,11 +2093,15 @@ class LINGBOTMAP_PT_setup(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        _draw_help(layout, "setup")
         self._draw_host_status(layout)
         layout.separator()
         snapshot = get_setup_snapshot()
         icon = "CHECKMARK" if snapshot.state == "ready" else "ERROR" if snapshot.state == "failed" else "INFO"
-        layout.label(text=snapshot.message, icon=icon)
+        layout.label(
+            text=tr(snapshot.message, bpy_module=bpy),
+            icon=icon,
+        )
         if snapshot.state in {"running", "cancelling"}:
             layout.operator(LINGBOTMAP_OT_cancel_runtime_setup.bl_idname)
         else:
@@ -1924,43 +2114,100 @@ class LINGBOTMAP_PT_setup(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         for entry in catalog.entries:
             box = layout.box()
             role = "Reconstruction Model" if entry.role == "reconstruction" else "Optional Auxiliary Model"
-            box.label(text=f"{role}: {entry.display_name}")
-            source = entry.artifact.source_repository.removeprefix("https://")
-            box.label(text=f"Source: {source} @ {entry.artifact.source_revision[:12]}")
             box.label(
-                text=f"License: {entry.license_record.spdx_expression} ({entry.license_record.status})",
+                text=tr(
+                    "{role}: {name}",
+                    bpy_module=bpy,
+                    role=tr(role, bpy_module=bpy),
+                    name=entry.display_name,
+                )
+            )
+            source = entry.artifact.source_repository.removeprefix("https://")
+            box.label(
+                text=tr(
+                    "Source: {source} @ {revision}",
+                    bpy_module=bpy,
+                    source=source,
+                    revision=entry.artifact.source_revision[:12],
+                )
+            )
+            box.label(
+                text=tr(
+                    "License: {license} ({status})",
+                    bpy_module=bpy,
+                    license=entry.license_record.spdx_expression,
+                    status=entry.license_record.status,
+                ),
                 icon="ERROR" if not entry.license_record.covers_weights else "CHECKMARK",
             )
-            box.label(text=f"SHA-256: {entry.artifact.sha256}")
-            box.label(text=f"Download size: {entry.artifact.length:,} bytes")
+            box.label(
+                text=tr(
+                    "SHA-256: {sha256}",
+                    bpy_module=bpy,
+                    sha256=entry.artifact.sha256,
+                )
+            )
+            box.label(
+                text=tr(
+                    "Download size: {bytes} bytes",
+                    bpy_module=bpy,
+                    bytes=f"{entry.artifact.length:,}",
+                )
+            )
             status = store.quick_status(entry)
-            box.label(text=f"Managed status: {status}")
+            box.label(
+                text=tr(
+                    "Managed status: {status}",
+                    bpy_module=bpy,
+                    status=status,
+                )
+            )
             row = box.row(align=True)
             download = row.operator(
                 LINGBOTMAP_OT_download_model.bl_idname,
-                text="Check Offline" if preferences.offline_setup else "Download",
+                text=tr(
+                    (
+                        "Check Offline"
+                        if preferences.offline_setup
+                        else "Download"
+                    ),
+                    bpy_module=bpy,
+                ),
             )
             download.model_id = entry.id
             local_import = row.operator(LINGBOTMAP_OT_import_model.bl_idname, text="Import Local")
             local_import.model_id = entry.id
         if model_snapshot.state in {"running", "cancelling"}:
             layout.label(
-                text=(
-                    f"{model_snapshot.message}: "
-                    f"{model_snapshot.completed:,}/{model_snapshot.total:,} bytes"
+                text=tr(
+                    "{message}: {completed}/{total} bytes",
+                    bpy_module=bpy,
+                    message=tr(
+                        model_snapshot.message,
+                        bpy_module=bpy,
+                    ),
+                    completed=f"{model_snapshot.completed:,}",
+                    total=f"{model_snapshot.total:,}",
                 ),
                 icon="INFO",
             )
             layout.operator(LINGBOTMAP_OT_cancel_model_setup.bl_idname)
         elif model_snapshot.state in {"ready", "failed", "cancelled"}:
             layout.label(
-                text=model_snapshot.message,
+                text=tr(model_snapshot.message, bpy_module=bpy),
                 icon="CHECKMARK" if model_snapshot.state == "ready" else "ERROR",
             )
         capability = get_capability_snapshot()
         selected_uuid = getattr(preferences, "gpu_uuid", "").strip()
         layout.label(
-            text=f"Physical GPU: {selected_uuid or 'not selected'}",
+            text=tr(
+                "Physical GPU: {uuid}",
+                bpy_module=bpy,
+                uuid=(
+                    selected_uuid
+                    or tr("not selected", bpy_module=bpy)
+                ),
+            ),
             icon="CHECKMARK" if selected_uuid else "INFO",
         )
         capability_icon = (
@@ -1968,13 +2215,22 @@ class LINGBOTMAP_PT_setup(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
             else "ERROR" if capability.state in {"failed", "blocked", "cancelled"}
             else "INFO"
         )
-        layout.label(text=capability.message, icon=capability_icon)
+        layout.label(
+            text=tr(capability.message, bpy_module=bpy),
+            icon=capability_icon,
+        )
         if capability.state in {"preparing", "running", "cancelling"}:
             if capability.total:
                 layout.label(
-                    text=(
-                        f"{capability.phase or 'starting'}: "
-                        f"{capability.completed}/{capability.total}"
+                    text=tr(
+                        "{phase}: {completed}/{total}",
+                        bpy_module=bpy,
+                        phase=(
+                            capability.phase
+                            or tr("starting", bpy_module=bpy)
+                        ),
+                        completed=capability.completed,
+                        total=capability.total,
                     )
                 )
             layout.operator(LINGBOTMAP_OT_cancel_gpu_profiles.bl_idname)
@@ -1987,7 +2243,14 @@ class LINGBOTMAP_PT_setup(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
             required = int(result.get("required_free_bytes", 0))
             peak = int(result.get("measured_peak_bytes", 0))
             layout.label(
-                text=f"{name}: {state} (peak {peak:,} B; required {required:,} B)",
+                text=tr(
+                    "{name}: {state} (peak {peak} B; required {required} B)",
+                    bpy_module=bpy,
+                    name=name,
+                    state=tr(state, bpy_module=bpy),
+                    peak=f"{peak:,}",
+                    required=f"{required:,}",
+                ),
                 icon="CHECKMARK" if state == "qualified" else "ERROR",
             )
 
@@ -2000,13 +2263,18 @@ class LINGBOTMAP_PT_reconstruct(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
     def draw(self, context):
         decision = get_host_decision()
         layout = self.layout
+        _draw_help(layout, "reconstruction")
         data = getattr(bpy, "data", None)
         for duplicate_uuid, scenes in duplicate_scene_uuid_groups(
             tuple(getattr(data, "scenes", ()))
         ).items():
             box = layout.box()
             box.label(
-                text=f"Duplicate Scene ID: {duplicate_uuid}",
+                text=tr(
+                    "Duplicate Scene ID: {uuid}",
+                    bpy_module=bpy,
+                    uuid=duplicate_uuid,
+                ),
                 icon="ERROR",
             )
             box.label(
@@ -2015,7 +2283,11 @@ class LINGBOTMAP_PT_reconstruct(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
             for scene in scenes:
                 repair = box.operator(
                     LINGBOTMAP_OT_repair_scene_uuid.bl_idname,
-                    text=f"Keep {scene.name}",
+                    text=tr(
+                        "Keep {name}",
+                        bpy_module=bpy,
+                        name=scene.name,
+                    ),
                 )
                 repair.duplicate_uuid = duplicate_uuid
                 repair.keeper_pointer = str(scene.as_pointer())
@@ -2051,16 +2323,40 @@ class LINGBOTMAP_PT_active_job(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
     def draw(self, _context):
         snapshot = get_job_snapshot()
         layout = self.layout
+        _draw_help(layout, "active_job")
         icon = "CHECKMARK" if snapshot.state == "succeeded" else "ERROR" if snapshot.state in {
             "failed", "interrupted", "forced_termination", "protocol_error", "stale_identity"
         } else "INFO"
-        layout.label(text=snapshot.message, icon=icon)
+        layout.label(
+            text=tr(snapshot.message, bpy_module=bpy),
+            icon=icon,
+        )
         if snapshot.job_id:
-            layout.label(text=f"Job: {snapshot.job_id}")
+            layout.label(
+                text=tr(
+                    "Job: {job_id}",
+                    bpy_module=bpy,
+                    job_id=snapshot.job_id,
+                )
+            )
         if snapshot.phase:
-            layout.label(text=f"{snapshot.phase}: {snapshot.completed}/{snapshot.total}")
+            layout.label(
+                text=tr(
+                    "{phase}: {completed}/{total}",
+                    bpy_module=bpy,
+                    phase=tr(snapshot.phase, bpy_module=bpy),
+                    completed=snapshot.completed,
+                    total=snapshot.total,
+                )
+            )
         if snapshot.eta_seconds is not None:
-            layout.label(text=f"ETA: {snapshot.eta_seconds:.0f} s")
+            layout.label(
+                text=tr(
+                    "ETA: {seconds} s",
+                    bpy_module=bpy,
+                    seconds=f"{snapshot.eta_seconds:.0f}",
+                )
+            )
         if snapshot.state in {"starting", "running", "reconnecting", "unresponsive", "cancelling"}:
             layout.operator(LINGBOTMAP_OT_cancel_active_job.bl_idname)
 
@@ -2071,6 +2367,7 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
     bl_order = 3
 
     def draw(self, context):
+        _draw_help(self.layout, "results")
         external = self.layout.operator(
             LINGBOTMAP_OT_import_external_result.bl_idname,
             text="Import External Result",
@@ -2094,14 +2391,20 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         else:
             state = "complete" if snapshot.complete else "scanning"
             self.layout.label(
-                text=(
-                    f"Project inventory: {state} · "
-                    f"{snapshot.scanned_entries:,} direct entries"
+                text=tr(
+                    "Project inventory: {state} · {count} direct entries",
+                    bpy_module=bpy,
+                    state=tr(state, bpy_module=bpy),
+                    count=f"{snapshot.scanned_entries:,}",
                 )
             )
             if _project_inventory_error:
                 self.layout.label(
-                    text=f"Inventory stopped safely: {_project_inventory_error}",
+                    text=tr(
+                        "Inventory stopped safely: {error}",
+                        bpy_module=bpy,
+                        error=_project_inventory_error,
+                    ),
                     icon="ERROR",
                 )
             if snapshot.jobs_abnormal:
@@ -2136,13 +2439,19 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         ):
             self.layout.label(text="No Reconstruction Results discovered")
             return
-        self.layout.label(text=get_import_status())
+        self.layout.label(
+            text=tr(get_import_status(), bpy_module=bpy)
+        )
         drawn_imported = set()
         for result in results:
             box = self.layout.box()
             if result.status != "recognized":
                 box.label(
-                    text=f"Unrecognized: {result.name}",
+                    text=tr(
+                        "Unrecognized: {name}",
+                        bpy_module=bpy,
+                        name=result.name,
+                    ),
                     icon="ERROR",
                 )
                 box.label(text=result.detail or "No action is available")
@@ -2152,19 +2461,28 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                 icon="INFO",
             )
             box.label(
-                text=(
-                    f"{result.profile_name}: "
-                    f"{int(result.point_count or 0):,} points"
+                text=tr(
+                    "{profile}: {points} points",
+                    bpy_module=bpy,
+                    profile=result.profile_name,
+                    points=f"{int(result.point_count or 0):,}",
                 )
             )
             box.label(
-                text=(
-                    f"{int(result.frame_count or 0):,} frames · "
-                    f"{result.result_id}"
+                text=tr(
+                    "{frames} frames · {result_id}",
+                    bpy_module=bpy,
+                    frames=f"{int(result.frame_count or 0):,}",
+                    result_id=result.result_id,
                 )
             )
             box.label(
-                text=f"Target Scene: {result.scene_name} · {result.scene_uuid}"
+                text=tr(
+                    "Target Scene: {name} · {uuid}",
+                    bpy_module=bpy,
+                    name=result.scene_name,
+                    uuid=result.scene_uuid,
+                )
             )
             result_directory = (
                 project_result_root(blend_path)
@@ -2205,13 +2523,25 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                     if inspection.status == "managed":
                         keep = box.operator(
                             LINGBOTMAP_OT_resolve_duplicate_imports.bl_idname,
-                            text=f"Keep {collection.name}",
+                            text=tr(
+                                "Keep {name}",
+                                bpy_module=bpy,
+                                name=collection.name,
+                            ),
                         )
                         keep.result_id = result.result_id
                         keep.keeper_pointer = str(collection.as_pointer())
                     else:
                         box.label(
-                            text=f"{collection.name}: {inspection.message}",
+                            text=tr(
+                                "{name}: {message}",
+                                bpy_module=bpy,
+                                name=collection.name,
+                                message=tr(
+                                    inspection.message,
+                                    bpy_module=bpy,
+                                ),
+                            ),
                             icon="ERROR",
                         )
             if result.dense_status == "retained-unvalidated":
@@ -2252,7 +2582,14 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                 continue
             box = self.layout.box()
             claims = tuple(imported_by_id.get(result_id, ()))
-            box.label(text=f"Imported {result_id}", icon="INFO")
+            box.label(
+                text=tr(
+                    "Imported {result_id}",
+                    bpy_module=bpy,
+                    result_id=result_id,
+                ),
+                icon="INFO",
+            )
             if len(claims) > 1:
                 box.label(
                     text="Duplicate Imported Identity",
@@ -2265,7 +2602,11 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                     if inspection.status == "managed":
                         keep = box.operator(
                             LINGBOTMAP_OT_resolve_duplicate_imports.bl_idname,
-                            text=f"Keep {candidate.name}",
+                            text=tr(
+                                "Keep {name}",
+                                bpy_module=bpy,
+                                name=candidate.name,
+                            ),
                         )
                         keep.result_id = str(result_id)
                         keep.keeper_pointer = str(candidate.as_pointer())
@@ -2320,7 +2661,11 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                 continue
             action = box.operator(
                 LINGBOTMAP_OT_import_result_into.bl_idname,
-                text=f"Import Into {scene.name}",
+                text=tr(
+                    "Import Into {name}",
+                    bpy_module=bpy,
+                    name=scene.name,
+                ),
             )
             action.result_directory = str(result_directory)
             action.target_scene_pointer = str(scene.as_pointer())
@@ -2334,18 +2679,33 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         )
         icon = "CHECKMARK" if inspection.status == "managed" else "ERROR"
         box.label(
-            text=f"{collection.name}: {inspection.message}",
+            text=tr(
+                "{name}: {message}",
+                bpy_module=bpy,
+                name=collection.name,
+                message=tr(inspection.message, bpy_module=bpy),
+            ),
             icon=icon,
         )
         authority = effective_disk_authority(
             collection, bpy.data.filepath
         )
-        box.label(text=f"Disk authority: {authority}")
+        box.label(
+            text=tr(
+                "Disk authority: {authority}",
+                bpy_module=bpy,
+                authority=tr(authority, bpy_module=bpy),
+            )
+        )
         status, resolved = result_reference_status(
             collection, bpy.data.filepath
         )
         box.label(
-            text=f"Result reference: {status}",
+            text=tr(
+                "Result reference: {status}",
+                bpy_module=bpy,
+                status=tr(status, bpy_module=bpy),
+            ),
             icon="CHECKMARK" if status == "available" else "ERROR",
         )
         if resolved:
@@ -2388,7 +2748,12 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         start = int(collection.get("lingbot_map_timeline_start", 0))
         count = int(collection.get("lingbot_map_frame_count", 0))
         box.label(
-            text=f"Source-aligned frames: {start}–{start + max(0, count - 1)}"
+            text=tr(
+                "Source-aligned frames: {start}–{end}",
+                bpy_module=bpy,
+                start=start,
+                end=start + max(0, count - 1),
+            )
         )
         status = str(
             collection.get(
@@ -2396,7 +2761,11 @@ class LINGBOTMAP_PT_results(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
             )
         )
         box.label(
-            text=f"Source Background: {status}",
+            text=tr(
+                "Source Background: {status}",
+                bpy_module=bpy,
+                status=tr(status, bpy_module=bpy),
+            ),
             icon="CHECKMARK" if status == "attached-hidden" else "INFO",
         )
         camera = box.operator(
@@ -2452,24 +2821,36 @@ def _draw_project_trash(layout, snapshot, lifecycle_actions_enabled):
     total = sum(item.category == "trash" for item in snapshot.items)
     if not trash_items:
         layout.label(
-            text=(
-                "Project Trash is empty"
-                if snapshot.complete
-                else "Scanning direct Project entries…"
+            text=tr(
+                (
+                    "Project Trash is empty"
+                    if snapshot.complete
+                    else "Scanning direct Project entries…"
+                ),
+                bpy_module=bpy,
             )
         )
     for item in trash_items:
         box = layout.box()
         if item.status == "unrecognized" or not item.ordinary:
             box.label(
-                text=f"Unrecognized: {item.name}",
+                text=tr(
+                    "Unrecognized: {name}",
+                    bpy_module=bpy,
+                    name=item.name,
+                ),
                 icon="ERROR",
             )
             box.label(text=item.detail or "No action is available")
             continue
         partial = item.status.endswith("-partial_delete")
         box.label(
-            text=f"{item.status}: {item.name}",
+            text=tr(
+                "{status}: {name}",
+                bpy_module=bpy,
+                status=tr(item.status, bpy_module=bpy),
+                name=item.name,
+            ),
             icon="ERROR" if partial else "INFO",
         )
         if partial:
@@ -2486,10 +2867,13 @@ def _draw_project_trash(layout, snapshot, lifecycle_actions_enabled):
         if lifecycle_actions_enabled:
             delete = box.operator(
                 LINGBOTMAP_OT_delete_trash.bl_idname,
-                text=(
-                    "Retry Permanent Delete"
-                    if partial
-                    else "Permanently Delete"
+                text=tr(
+                    (
+                        "Retry Permanent Delete"
+                        if partial
+                        else "Permanently Delete"
+                    ),
+                    bpy_module=bpy,
                 ),
                 icon="TRASH",
             )
@@ -2510,6 +2894,7 @@ class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
     bl_order = 4
 
     def draw(self, _context):
+        _draw_help(self.layout, "diagnostics")
         blend_path = str(getattr(bpy.data, "filepath", ""))
         snapshot = project_inventory_snapshot(blend_path)
         if snapshot is None:
@@ -2519,7 +2904,11 @@ class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
             return
         if _project_inventory_error:
             self.layout.label(
-                text=f"Inventory stopped safely: {_project_inventory_error}",
+                text=tr(
+                    "Inventory stopped safely: {error}",
+                    bpy_module=bpy,
+                    error=_project_inventory_error,
+                ),
                 icon="ERROR",
             )
         lifecycle_actions_enabled = bool(
@@ -2544,7 +2933,11 @@ class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         for item in visible_jobs:
             box = self.layout.box()
             box.label(
-                text=f"Unrecognized .jobs entry: {item.name}",
+                text=tr(
+                    "Unrecognized .jobs entry: {name}",
+                    bpy_module=bpy,
+                    name=item.name,
+                ),
                 icon="ERROR",
             )
             box.label(text=item.detail or "No lifecycle action is available")
@@ -2560,10 +2953,13 @@ class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         )
         if not diagnostics:
             self.layout.label(
-                text=(
-                    "No Diagnostics"
-                    if snapshot.complete
-                    else "Scanning direct Project entries…"
+                text=tr(
+                    (
+                        "No Diagnostics"
+                        if snapshot.complete
+                        else "Scanning direct Project entries…"
+                    ),
+                    bpy_module=bpy,
                 )
             )
         for item in diagnostics:
@@ -2605,9 +3001,10 @@ class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
         ):
             multi = self.layout.operator(
                 LINGBOTMAP_OT_trash_diagnostic.bl_idname,
-                text=(
-                    "Move First "
-                    f"{len(recognized_diagnostics)} Displayed Diagnostics"
+                text=tr(
+                    "Move First {count} Displayed Diagnostics",
+                    bpy_module=bpy,
+                    count=len(recognized_diagnostics),
                 ),
                 icon="TRASH",
             )
@@ -2625,6 +3022,7 @@ class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
 
 CLASSES = (
     LINGBOTMAP_Preferences,
+    LINGBOTMAP_OT_open_offline_help,
     LINGBOTMAP_OT_setup_runtime,
     LINGBOTMAP_OT_cancel_runtime_setup,
     LINGBOTMAP_OT_download_model,

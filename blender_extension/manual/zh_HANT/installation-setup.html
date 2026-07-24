@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-Hant" data-locale="zh_HANT">
+<head><meta charset="utf-8"><title>安裝與設定 — LingBot Map Reconstruction</title><link rel="stylesheet" href="../style.css"></head>
+<body data-chapter-id="installation-setup">
+<nav><a href="index.html">概覽</a><a href="installation-setup.html">安裝與設定</a><a href="capture.html">擷取</a><a href="profiles.html">設定檔</a><a href="reconstruction.html">重建</a><a href="import-visualization.html">匯入與顯示</a><a href="result-lifecycle.html">Results 與垃圾桶</a><a href="privacy-diagnostics.html">隱私與診斷</a><a href="model-licensing.html">模型授權</a><a href="errors-troubleshooting.html">錯誤</a></nav>
+<main>
+<section id="installation" data-section-id="installation"><h1>安裝</h1><p>透過 Blender 的 Extension 管理員安裝有版本的 <code>lingbot_map_reconstruction-0.1.0.zip</code>。工程版 ZIP 來自 HephronEnergyAK fork 的標記 GitHub Releases，並發布 SHA-256 與 SBOM。擴充功能沒有自訂更新程式，也不會在背景檢查更新。</p><p>套件只宣告檔案、網路與剪貼簿權限。網路權限只在明確的線上執行環境或模型設定操作後使用；剪貼簿權限只由「複製診斷報告」使用。</p></section>
+<section id="setup" data-section-id="setup"><h2>設定</h2><p>設定面板會分別顯示不可變 Worker 執行環境、必要的重建模型、選用天空輔助模型、所選實體 GPU UUID，以及各設定檔驗證狀態。先使用「設定 Worker 執行環境」，再明確下載或匯入與目錄完全相同的模型位元組，最後執行「測試 GPU 設定檔」。</p><p>執行環境建構使用固定 Python 3.10、uv、套件、schemas 及應用程式 wheel。工作使用內容定址且已發布的執行環境，絕不修改它。</p></section>
+<section id="offline-setup" data-section-id="offline-setup"><h2>離線設定</h2><p>離線設定只允許受管理 cache 中已驗證的產物，絕不回退為連線。若缺少確切產物，設定會以精確的缺少產物訊息失敗。請先透過一次明確的線上設定填入 cache，或以「匯入本機檔案」提供完全相符的目錄模型。</p></section>
+<section id="supported-host" data-section-id="supported-host" class="warning"><h2>支援的主機</h2><p>原生 version one 只支援 Windows 11 x64 與 Blender 5.2 LTS。Windows 10、Windows Server、Windows on ARM、相容層、其他 Blender 版本及 WSL 都是 Unsupported，且沒有繞過選項。GPU 支援不由型號名稱或 VRAM 清單推定：每個設定檔都必須在所選實體 GPU UUID 上通過固定軟體堆疊的能力測試。</p></section>
+</main></body></html>

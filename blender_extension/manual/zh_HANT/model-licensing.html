@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-Hant" data-locale="zh_HANT">
+<head><meta charset="utf-8"><title>模型來源與授權 — LingBot Map Reconstruction</title><link rel="stylesheet" href="../style.css"></head>
+<body data-chapter-id="model-licensing">
+<nav><a href="index.html">概覽</a><a href="installation-setup.html">安裝與設定</a><a href="capture.html">擷取</a><a href="profiles.html">設定檔</a><a href="reconstruction.html">重建</a><a href="import-visualization.html">匯入與顯示</a><a href="result-lifecycle.html">Results 與垃圾桶</a><a href="privacy-diagnostics.html">隱私與診斷</a><a href="model-licensing.html">模型授權</a><a href="errors-troubleshooting.html">錯誤</a></nav>
+<main>
+<section id="model-licenses" data-section-id="model-licenses"><h1>模型來源與授權</h1><p>封裝的 Model Catalog 會固定每個啟用模型的 upstream repository、immutable revision、filename、byte length、SHA-256、serialization contract、顯示的 SPDX expression、captured license-text identity 及 weight-license evidence status。設定會在明確下載前顯示來源、授權與 checksum。</p><p>GPL Blender 擴充功能、Apache-2.0 Worker 邊界、第三方執行環境套件及每個模型產物各有獨立 LICENSE 與 NOTICE 紀錄。絕不假設周邊程式碼 repository 的授權涵蓋 weight file。</p></section>
+<section id="model-acquisition" data-section-id="model-acquisition"><h2>模型取得</h2><p>線上下載與本機匯入只接受與目錄完全相同的長度及 SHA-256。未知 checksums 與任意 checkpoints 都會被拒絕。下載使用 checksum 專屬 staging 與已驗證的 HTTPS resume metadata；只有完整且已驗證的產物會以原子方式發布。工作絕不執行所選外部路徑。</p></section>
+<section id="weight-license-gate" data-section-id="weight-license-gate" class="gate"><h2>權重專用 1.0 gate</h2><p>目前 upstream pages 將 LingBot-Map 描述為 Apache-2.0、SkySeg 描述為 MIT，但能證明這些條款涵蓋確切啟用 weight files 的可歸屬證據仍待完成。工程版可使用完全相同的 catalogued checksums 進行開發測試。在兩份權重專用紀錄完整之前，1.0.0 與官方平台提交仍受阻；不得將此 gate 表示為已解決。</p></section>
+</main></body></html>

@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-Hant" data-locale="zh_HANT">
+<head><meta charset="utf-8"><title>匯入與視覺化 — LingBot Map Reconstruction</title><link rel="stylesheet" href="../style.css"></head>
+<body data-chapter-id="import-visualization">
+<nav><a href="index.html">概覽</a><a href="installation-setup.html">安裝與設定</a><a href="capture.html">擷取</a><a href="profiles.html">設定檔</a><a href="reconstruction.html">重建</a><a href="import-visualization.html">匯入與顯示</a><a href="result-lifecycle.html">Results 與垃圾桶</a><a href="privacy-diagnostics.html">隱私與診斷</a><a href="model-licensing.html">模型授權</a><a href="errors-troubleshooting.html">錯誤</a></nav>
+<main>
+<section id="import" data-section-id="import"><h1>交易式匯入</h1><p>匯入會先完整驗證 Result 路徑、schemas、checksums、array headers、shapes、values、provenance、目標綁定與記憶體容量，之後才配置 Blender 資料。它會建立未連結的 staging Collection，並只在 commit point 連結至所選場景。取消或失敗會移除該次嘗試唯一建立的所有 datablocks；磁碟 Result 不會變更。</p><p>自動及一般匯入使用原始且唯一的目標場景。「匯入至」可在確認後使用另一個具有唯一識別的場景。「匯入外部 Result」會驗證使用者選取的外部目錄，並建立沒有生命週期權限的唯讀磁碟參照。</p></section>
+<section id="visualization" data-section-id="visualization"><h2>Point Cloud 視覺化</h2><p>重建 Collection 包含原生彩色 Point Cloud、重建相機、軌跡及重建 Root。來源 RGB 使用 Emission material；信心度顯示使用 Viridis。Radius Scale 與重建 Root scale 都是可逆的 Blender 控制，絕不重寫 Result arrays。</p><p>需要 Material Preview 或 Rendered viewport shading 才能檢查 material 色彩。匯入絕不自動變更 viewport shading、exposure、color management 或場景 render engine。</p></section>
+<section id="camera" data-section-id="camera"><h2>相機與來源對齊檢查</h2><p>匯入的重建相機會保留 source-space intrinsics、每影格 quaternion pose、linear F-Curves 與凍結的 Timeline Start。除非明確選擇「使用重建相機」，否則不會成為場景相機。來源背景只能以確切來源 checksum 重新連結，且預設隱藏。</p><p>36&nbsp;mm 虛擬 sensor 與動畫 lens 用於重現 horizontal field of view，並不宣稱是實際擷取感光元件。模型裁切導引是暫時且不參與算圖的 overlay。</p></section>
+<section id="render-engines" data-section-id="render-engines" class="warning"><h2>算圖引擎</h2><p>最終 Point Cloud 算圖只保證支援 Cycles。非 Cycles 場景仍可匯入，但擴充功能必須提出警告且絕不自動切換引擎。在 Cycles 中，點對 camera、reflection 及 transmission rays 維持可見，同時對 diffuse、volume 及 shadow rays 使用 transparent branch。</p></section>
+</main></body></html>

@@ -28,6 +28,35 @@ class FakeRegistration:
         self.unregistered.append(extension_class)
 
 
+class FakeTranslations:
+    def __init__(self):
+        self.locale = "en_US"
+        self.catalogs = {}
+        self.registered = []
+        self.unregistered = []
+
+    def register(self, owner, catalog):
+        if owner in self.catalogs:
+            raise ValueError(f"duplicate translation owner: {owner}")
+        self.catalogs[owner] = catalog
+        self.registered.append(owner)
+
+    def unregister(self, owner):
+        if owner not in self.catalogs:
+            raise RuntimeError(f"unknown translation owner: {owner}")
+        del self.catalogs[owner]
+        self.unregistered.append(owner)
+
+    def pgettext(self, message, msgctxt="*"):
+        for catalog in self.catalogs.values():
+            translated = catalog.get(self.locale, {}).get(
+                (msgctxt, message)
+            )
+            if translated is not None:
+                return translated
+        return message
+
+
 class FakeLayout:
     def __init__(self, events=None):
         self.events = events if events is not None else []
@@ -55,6 +84,7 @@ class FakeLayout:
 
 def install_fake_bpy(version=(5, 2, 1)):
     registration = FakeRegistration()
+    translations = FakeTranslations()
     class FakeFileImportMenu:
         callbacks = []
 
@@ -67,7 +97,14 @@ def install_fake_bpy(version=(5, 2, 1)):
             cls.callbacks.remove(callback)
 
     bpy = ModuleType("bpy")
-    bpy.app = SimpleNamespace(version=version, online_access=False)
+    bpy.app = SimpleNamespace(
+        version=version,
+        online_access=False,
+        translations=translations,
+    )
+    bpy.ops = SimpleNamespace(
+        wm=SimpleNamespace(url_open=lambda **_kwargs: {"FINISHED"})
+    )
     bpy.types = SimpleNamespace(
         AddonPreferences=type("AddonPreferences", (), {}),
         Operator=type("Operator", (), {}),
@@ -134,6 +171,32 @@ class BlenderExtensionManifestTests(unittest.TestCase):
                 self.assertIn("blender_manifest.toml", names)
                 self.assertIn("__init__.py", names)
                 self.assertIn("LICENSE.txt", names)
+                self.assertIn("locale_catalogs.py", names)
+                self.assertIn("localization.py", names)
+                self.assertIn("manual/manifest.json", names)
+                self.assertIn("manual/style.css", names)
+                self.assertEqual(
+                    len(
+                        [
+                            name
+                            for name in names
+                            if name.startswith("manual/en_US/")
+                            and name.endswith(".html")
+                        ]
+                    ),
+                    10,
+                )
+                self.assertEqual(
+                    len(
+                        [
+                            name
+                            for name in names
+                            if name.startswith("manual/zh_HANT/")
+                            and name.endswith(".html")
+                        ]
+                    ),
+                    10,
+                )
                 self.assertNotIn("lingbot_map/model_adapter.py", names)
                 self.assertFalse(any(name.endswith((".pt", ".pth", ".onnx")) for name in names))
 
@@ -251,6 +314,14 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(
             len(self.bpy.types.TOPBAR_MT_file_import.callbacks), 1
         )
+        self.assertEqual(
+            self.bpy.app.translations.registered,
+            ["blender_extension.localization"],
+        )
+        self.assertEqual(
+            self.bpy.app.translations.pgettext("Setup"),
+            "Setup",
+        )
 
         self.extension.unregister()
         self.assertEqual(self.registration.unregistered, list(reversed(expected)))
@@ -258,6 +329,11 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(
             self.bpy.types.TOPBAR_MT_file_import.callbacks, []
         )
+        self.assertEqual(
+            self.bpy.app.translations.unregistered,
+            ["blender_extension.localization"],
+        )
+        self.assertEqual(self.bpy.app.translations.catalogs, {})
 
         self.extension = importlib.reload(self.extension)
         with mock.patch.object(
@@ -278,6 +354,59 @@ class RegistrationTests(unittest.TestCase):
 
         self.assertEqual(len(self.registration.registered), len(self.extension.CLASSES))
         self.assertFalse(self.extension.get_host_decision().supported)
+
+    def test_registration_failure_rolls_back_translation_catalog(self):
+        with (
+            mock.patch.object(
+                self.extension,
+                "probe_supported_host",
+                return_value=self.supported_decision(),
+            ),
+            mock.patch.object(
+                self.registration,
+                "register_class",
+                side_effect=RuntimeError("synthetic registration failure"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "synthetic registration failure",
+            ):
+                self.extension.register()
+        self.assertEqual(self.bpy.app.translations.catalogs, {})
+        self.assertIsNone(self.extension.get_host_decision())
+
+    def test_class_cleanup_failure_still_unregisters_translation_catalog(self):
+        with mock.patch.object(
+            self.extension,
+            "probe_supported_host",
+            return_value=self.supported_decision(),
+        ):
+            self.extension.register()
+        expected = list(reversed(self.extension.CLASSES))
+        original_unregister = self.registration.unregister_class
+        calls = 0
+
+        def fail_first_class(extension_class):
+            nonlocal calls
+            calls += 1
+            original_unregister(extension_class)
+            if calls == 1:
+                raise RuntimeError("synthetic class cleanup failure")
+
+        with mock.patch.object(
+            self.registration,
+            "unregister_class",
+            side_effect=fail_first_class,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "synthetic class cleanup failure",
+            ):
+                self.extension.unregister()
+        self.assertEqual(self.registration.unregistered, expected)
+        self.assertEqual(self.bpy.app.translations.catalogs, {})
+        self.assertIsNone(self.extension.get_host_decision())
 
     def test_completed_job_refreshes_bounded_inventory_once_then_waits(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -367,6 +496,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(
             [operator.bl_idname for operator in operators],
             [
+                "lingbot_map.open_offline_help",
                 "lingbot_map.setup_runtime",
                 "lingbot_map.cancel_runtime_setup",
                 "lingbot_map.download_model",

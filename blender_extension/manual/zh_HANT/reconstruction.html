@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-Hant" data-locale="zh_HANT">
+<head><meta charset="utf-8"><title>重建與取消 — LingBot Map Reconstruction</title><link rel="stylesheet" href="../style.css"></head>
+<body data-chapter-id="reconstruction">
+<nav><a href="index.html">概覽</a><a href="installation-setup.html">安裝與設定</a><a href="capture.html">擷取</a><a href="profiles.html">設定檔</a><a href="reconstruction.html">重建</a><a href="import-visualization.html">匯入與顯示</a><a href="result-lifecycle.html">Results 與垃圾桶</a><a href="privacy-diagnostics.html">隱私與診斷</a><a href="model-licensing.html">模型授權</a><a href="errors-troubleshooting.html">錯誤</a></nav>
+<main>
+<section id="reconstruction" data-section-id="reconstruction"><h1>重建</h1><p>儲存目標 <code>.blend</code>、選擇擷取來源、選取已通過驗證的設定檔，再開始重建。不可變 JobSpec 會凍結目標檔案、場景 UUID、Timeline Start、來源識別、模型識別與設定。之後修改草稿不會重新指定執行中的工作。</p><p>獨立 Worker 以有界 queues 處理每個 presentation frame，寫入結構化 progress 與 heartbeat 檔案，並可在 Blender 關閉後繼續至完成。它不會在 Blender 內執行推論。</p></section>
+<section id="preflight" data-section-id="preflight"><h2>預檢</h2><p>預檢會解碼並驗證完整所選軌道，但不保留像素。它取得確切影格 timestamps、色彩與方向 facts、分類及完整來源 checksum。重建會重新檢查來源大小與修改時間，並在發布 Result 前重算 checksum。</p></section>
+<section id="cancellation" data-section-id="cancellation"><h2>取消與中斷</h2><p>取消會寫入單向要求。Worker 會在有界的解碼、推論、對齊及 checksum seams 檢查它。寬限期後，Blender 只會強制終止完整識別仍相符的確切行程。失效 Worker 絕不恢復；staging 會移至診斷，新工作可複製原設定。</p><p>明確睡眠、休眠、重新啟動或關機仍然允許。仍存活的 Worker 只有在 sleep request、CUDA、記憶體、磁碟及來源檢查都通過後才能繼續。</p></section>
+<section id="long-sources" data-section-id="long-sources"><h2>長擷取來源</h2><p>最多 320 個影格使用單一短推論 window。較長來源使用有重疊的有界 windows，並具明確對齊、以信心度決定 ownership 及 seam Quality Warnings。Version one 最多支援 25,000 個影格，且絕不抽樣、遺漏或複製 presentation frames。</p></section>
+<section id="loop-closure" data-section-id="loop-closure" class="warning"><h2>沒有明確 Loop Closure</h2><p>Version one 沒有 loop detector、pose graph、bundle adjustment 或全域軌跡最佳化。模型在部分 capture 上可能產生視覺上閉合的路徑，但這不是保證的 Loop Closure 功能。擴充功能絕不強迫最後相機回到第一個位置，也不暗中變形點資料。</p></section>
+</main></body></html>

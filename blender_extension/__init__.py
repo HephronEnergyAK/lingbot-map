@@ -8,6 +8,11 @@ import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
 from .host import probe_supported_host
+from .localization import (
+    register_translations,
+    translate as tr,
+    unregister_translations,
+)
 from .runtime import (
     cancel_model_setup,
     cancel_runtime_setup,
@@ -245,11 +250,21 @@ def _attempt_completed_result_auto_import() -> None:
                 "Ready to Import: automatic import gates did not all pass"
             )
     except (ImportCapacityError, ResultImportError, OSError, MemoryError) as exc:
-        set_import_status(f"Ready to Import: automatic import blocked: {exc}")
+        set_import_status(
+            tr(
+                "Ready to Import: automatic import blocked: {detail}",
+                bpy_module=bpy,
+                detail=exc,
+            )
+        )
     except Exception as exc:
         set_import_status(
-            "Ready to Import: automatic import failed and was rolled back: "
-            f"{type(exc).__name__}: {exc}"
+            tr(
+                "Ready to Import: automatic import failed and was rolled back: {type}: {detail}",
+                bpy_module=bpy,
+                type=type(exc).__name__,
+                detail=exc,
+            )
         )
 
 
@@ -264,6 +279,7 @@ def register() -> None:
     decision = probe_supported_host(tuple(bpy.app.version))
     set_host_decision(decision)
     try:
+        register_translations(bpy)
         for extension_class in CLASSES:
             bpy.utils.register_class(extension_class)
             _registered_classes.append(extension_class)
@@ -357,7 +373,13 @@ def register() -> None:
         _remove_import_external_result_menu()
         _remove_handlers_and_timer()
         _unregister_scene_property()
-        _unregister_classes()
+        try:
+            _unregister_classes()
+        except Exception:
+            # Registration's original failure is the primary error.  Every
+            # registered class was still offered for cleanup.
+            pass
+        unregister_translations(bpy)
         clear_host_decision()
         raise
 
@@ -376,10 +398,18 @@ def unregister() -> None:
     _unregister_scene_property()
     _remove_import_external_result_menu()
     _remove_handlers_and_timer()
-    _unregister_classes()
+    class_cleanup_error = None
+    try:
+        _unregister_classes()
+    except Exception as exc:
+        class_cleanup_error = exc
+    finally:
+        unregister_translations(bpy)
     _last_completed_job_for_auto_import = None
     _pending_completed_job_inventory = None
     clear_host_decision()
+    if class_cleanup_error is not None:
+        raise class_cleanup_error
 
 
 def _unregister_classes() -> None:

@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-Hant" data-locale="zh_HANT">
+<head><meta charset="utf-8"><title>LingBot Map Reconstruction — 離線手冊</title><link rel="stylesheet" href="../style.css"></head>
+<body data-chapter-id="overview">
+<nav><a href="index.html">概覽</a><a href="installation-setup.html">安裝與設定</a><a href="capture.html">擷取</a><a href="profiles.html">設定檔</a><a href="reconstruction.html">重建</a><a href="import-visualization.html">匯入與顯示</a><a href="result-lifecycle.html">Results 與垃圾桶</a><a href="privacy-diagnostics.html">隱私與診斷</a><a href="model-licensing.html">模型授權</a><a href="errors-troubleshooting.html">錯誤</a></nav>
+<main>
+<section id="overview" data-section-id="overview"><h1>LingBot Map Reconstruction 0.1.0</h1><p>本封裝手冊不需網路連線即可使用。擴充功能可將一個本機 MP4 或 MOV Continuous Take 轉換為 Blender 中的彩色 Point Cloud、動畫重建相機與軌跡。</p><p>擴充功能負責設定與匯入工作；神經推論在獨立且有限生命週期的 Worker 行程中執行，而非在 Blender 內。開啟本手冊或 LingBot Map 面板不會開始下載。</p></section>
+<section id="workflow" data-section-id="workflow"><h2>工作流程</h2><ol><li>在支援的主機安裝擴充功能，並完成明確的設定操作。</li><li>儲存 <code>.blend</code>、選擇一個擷取來源、執行預檢，再選擇已通過驗證的設定檔。</li><li>開始重建、監看或取消有限工作，然後匯入完整 Result。</li><li>檢查來源對齊相機與 Point Cloud；明確管理 Results、Dense Predictions、診斷及專案垃圾桶。</li></ol></section>
+<section id="release-limitations" data-section-id="release-limitations" class="gate"><h2>工程版限制</h2><p>0.1.0 是針對 Windows 11 x64、Blender 5.2 LTS、固定原生 NVIDIA 軟體堆疊及明確通過驗證之 GPU 設定檔的工程版。它沒有 WSL backend、即時相機輸入、自訂更新程式、Blender 官方 Extensions 上架或一般平台保證。</p><p>在完成 LingBot-Map 與 SkySeg 權重專用授權證據、具授權的 Release Fixture Corpus、完整 Blender 5.2 原生發布套件，以及 RTX 5090 Blackwell 與至少 16&nbsp;GB 的代表性 Ada 驗證證據之前，1.0.0 仍禁止發布。</p></section>
+</main></body></html>

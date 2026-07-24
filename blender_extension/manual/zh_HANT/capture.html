@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-Hant" data-locale="zh_HANT">
+<head><meta charset="utf-8"><title>擷取指南 — LingBot Map Reconstruction</title><link rel="stylesheet" href="../style.css"></head>
+<body data-chapter-id="capture">
+<nav><a href="index.html">概覽</a><a href="installation-setup.html">安裝與設定</a><a href="capture.html">擷取</a><a href="profiles.html">設定檔</a><a href="reconstruction.html">重建</a><a href="import-visualization.html">匯入與顯示</a><a href="result-lifecycle.html">Results 與垃圾桶</a><a href="privacy-diagnostics.html">隱私與診斷</a><a href="model-licensing.html">模型授權</a><a href="errors-troubleshooting.html">錯誤</a></nav>
+<main>
+<section id="capture-guidance" data-section-id="capture-guidance"><h1>擷取指南</h1><p>以單一向前移動、不中斷的 take 記錄大致靜態的場景。平順移動、讓相鄰視角保有足夠重疊、盡量避開缺乏特徵或高反射區域，並減少移動中的人物、車輛、動物、植被及螢幕。</p><p class="warning">Version one 不會偵測或移除 Dynamic Content。移動幾何可能產生殘影、拖影或重複。天空遮罩只移除天空候選點，並不是 Dynamic Content 移除。</p></section>
+<section id="continuous-take" data-section-id="continuous-take"><h2>只支援 Continuous Take</h2><p>不支援硬切、轉場、反轉或重複片段，以及速度重映射。剪輯過的影片可能造成相機跳躍與錯誤幾何。Worker 不會暗中偵測、分割或重新拼接剪輯。只要 presentation timestamps 嚴格遞增，即支援可變影格率；VFR 本身不代表影片經過剪輯。</p></section>
+<section id="lens-classes" data-section-id="lens-classes"><h2>鏡頭與投影類別</h2><p>來源必須是一般方形像素 rectilinear pinhole 影片。Version one 不支援 fisheye、360 度 equirectangular、anamorphic、非方形像素及自動鏡頭畸變校正投影。使用前請在外部轉換；擴充功能不宣稱能可靠偵測投影類型。</p></section>
+<section id="media-contract" data-section-id="media-contract"><h2>媒體契約</h2><p>請選擇一個包含至少八個 progressive、opaque presentation frames 的本機 MP4 或 MOV。顯示解析度、方向 transform 及 SDR BT.601 或 BT.709 色彩描述必須全程不變。不支援 interlace、alpha、不支援的 HDR（如 PQ、HLG、Dolby Vision）、損壞影格、含糊的視訊軌、影像資料夾、多支影片及即時相機串流。</p><p>每個 presentation frame 都依序處理。音訊不會解碼或匯入。影片以完整 SHA-256 識別，但絕不複製到 Result 或封裝進 <code>.blend</code>。</p></section>
+</main></body></html>

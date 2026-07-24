@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-Hant" data-locale="zh_HANT">
+<head><meta charset="utf-8"><title>設定檔 — LingBot Map Reconstruction</title><link rel="stylesheet" href="../style.css"></head>
+<body data-chapter-id="profiles">
+<nav><a href="index.html">概覽</a><a href="installation-setup.html">安裝與設定</a><a href="capture.html">擷取</a><a href="profiles.html">設定檔</a><a href="reconstruction.html">重建</a><a href="import-visualization.html">匯入與顯示</a><a href="result-lifecycle.html">Results 與垃圾桶</a><a href="privacy-diagnostics.html">隱私與診斷</a><a href="model-licensing.html">模型授權</a><a href="errors-troubleshooting.html">錯誤</a></nav>
+<main>
+<section id="profiles" data-section-id="profiles"><h1>重建設定檔</h1><p>草稿使用一次相機迭代、70% 信心度及 100 萬點匯入預算。平衡使用四次迭代、50% 信心度及 500 萬點。高品質使用四次迭代、30% 信心度及 1,000 萬點。設定檔只有在其確切能力測試以所需記憶體餘裕成功後才會啟用。</p></section>
+<section id="advanced-settings" data-section-id="advanced-settings"><h2>進階設定</h2><p>變更相機迭代次數、信心度門檻、深度門檻、匯入點數預算、Dense 保留或其他底層設定，都會使設定檔成為自訂。點數預算是輸出與匯入的硬限制，不是一定配置相同點數的要求。超過 1,000 萬點需要明確確認；5,000 萬點為絕對上限。</p><p>任何設定檔都不會變更固定 518 像素、patch size 14 的 canonical preprocessing crop，也不會弱化來源驗證。</p></section>
+<section id="gpu-qualification" data-section-id="gpu-qualification"><h2>GPU 驗證</h2><p>驗證綁定所選實體 NVML GPU UUID、執行環境、模型 checksums、固定軟體堆疊與設定。絕不儲存可變的 CUDA 序號。失敗時不會暗中降低設定。同一 Windows 帳號下，LingBot Map 行程對同一 GPU UUID 的工作會序列化。</p></section>
+<section id="sky-masking" data-section-id="sky-masking"><h2>天空遮罩</h2><p>天空遮罩是選用功能，會在 CPU 上使用獨立列於目錄中的輔助模型。它在重建模型推論後過濾天空候選點，絕不變更模型輸入。它不偵測人物、車輛或其他 Dynamic Content，遮罩也不會保留在 Result 中。</p></section>
+</main></body></html>
