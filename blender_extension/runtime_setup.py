@@ -25,6 +25,38 @@ import urllib.request
 import uuid
 import zipfile
 
+if __package__:
+    from .diagnostics import diagnostic_record
+else:
+    # This module is deliberately executable as a standalone installer/test
+    # boundary, without importing Blender's package initializer.
+    def diagnostic_record(
+        *,
+        error_code,
+        category,
+        state,
+        phase,
+        detail,
+        **_unused,
+    ):
+        return {
+            "schema_version": "1.0.0",
+            "error_code": str(error_code),
+            "category": str(category),
+            "state": str(state),
+            "phase": str(phase),
+            "job_id": None,
+            "target_scene": {},
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "machine_name": os.environ.get("COMPUTERNAME", ""),
+            "username": (
+                os.environ.get("USERNAME")
+                or os.environ.get("USER")
+                or ""
+            ),
+            "detail": str(detail)[:16384],
+        }
+
 
 PYTHON_VERSION = "3.10.20"
 WORKER_DISTRIBUTION = "lingbot-map-worker"
@@ -772,7 +804,18 @@ class RuntimeInstaller:
             f"{stamp}-{self.bundle.identity.runtime_id[:16]}-{uuid.uuid4().hex[:12]}"
         )
         os.replace(staging, destination)
-        record = {"reason": reason, "runtime_id": self.bundle.identity.runtime_id, **detail}
+        record = {
+            **diagnostic_record(
+                error_code=f"setup.runtime.{reason}",
+                category="setup",
+                state="cancelled" if reason == "cancelled" else "failed",
+                phase="runtime-setup",
+                detail=detail.get("error", reason),
+            ),
+            "reason": reason,
+            "runtime_id": self.bundle.identity.runtime_id,
+            **detail,
+        }
         (destination / "setup-diagnostic.json").write_text(
             json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )

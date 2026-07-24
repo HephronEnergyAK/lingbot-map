@@ -14,6 +14,7 @@ import time
 from typing import Any
 
 from .gpu_lease import WindowsProcessProbe, sha256_file
+from .human_log import HumanLogSession, write_terminal_diagnostic
 from .ipc import (
     IpcError,
     MAX_EVENT_LINE_BYTES,
@@ -385,6 +386,8 @@ class StatusStore:
         self._eta_seconds: float | None = None
         self._error: str | None = None
         self._terminal = False
+        self._protocol_stdout = getattr(sys.stdout, "buffer", sys.stdout)
+        self._log_discarded_bytes = 0
         self._write_status_locked()
 
     def _document_locked(self) -> dict[str, object]:
@@ -458,9 +461,57 @@ class StatusStore:
                 stream.write(line); stream.flush(); os.fsync(stream.fileno())
             self._write_status_locked()
             try:
-                sys.stdout.buffer.write(line); sys.stdout.buffer.flush()
+                self._protocol_stdout.write(line)
+                self._protocol_stdout.flush()
             except (BrokenPipeError, OSError):
                 pass
+
+    def log_truncated(self, cumulative_discarded_bytes: int) -> None:
+        with self._lock:
+            if cumulative_discarded_bytes <= self._log_discarded_bytes:
+                return
+            self._log_discarded_bytes = cumulative_discarded_bytes
+            phase = self._phase
+            completed = self._completed
+            total = self._total
+            eta_seconds = self._eta_seconds
+        self.emit(
+            "warning",
+            phase,
+            completed,
+            (
+                "Human log exceeded 64 MiB; oldest content was discarded "
+                f"({cumulative_discarded_bytes} cumulative bytes)"
+            ),
+            total=total,
+            eta_seconds=eta_seconds,
+            immediate=True,
+        )
+
+    def structured_warning(self, message: str) -> None:
+        with self._lock:
+            phase = self._phase
+            completed = self._completed
+            total = self._total
+            eta_seconds = self._eta_seconds
+        self.emit(
+            "warning",
+            phase,
+            completed,
+            require_text(
+                message,
+                label="warning.message",
+                maximum=4096,
+            ),
+            total=total,
+            eta_seconds=eta_seconds,
+            immediate=True,
+        )
+
+    @property
+    def diagnostic_phase(self) -> str:
+        with self._lock:
+            return self._phase
 
     def terminal(self, state: str, message: str, *, error: str | None = None) -> None:
         if state not in TERMINAL_STATES:
@@ -602,7 +653,13 @@ def run_fixture_job(spec_path: Path, nonce: str) -> int:
     state = "failed"
     message = "Fixture Job failed"
     error = None
+    caught_exception = None
     return_code = 1
+    human_log = HumanLogSession(
+        job_dir,
+        on_discard=store.log_truncated,
+        on_warning=store.structured_warning,
+    ).start()
     try:
         _set_below_normal_priority()
         _install_audit_policy()
@@ -618,13 +675,35 @@ def run_fixture_job(spec_path: Path, nonce: str) -> int:
             else:
                 state, message, return_code = "succeeded", "Fixture Job completed", 0
     except Exception as exc:
+        caught_exception = exc
         error = f"{type(exc).__name__}: {exc}"[:16384]
         message = "Fixture Job failed"
     finally:
         stop.set()
         if heartbeat.is_alive():
             heartbeat.join(timeout=6)
-        store.terminal(state, message, error=error)
+        error_code = f"pipeline.fixture.{state}"
+        store.terminal(
+            state,
+            message,
+            error=(
+                None
+                if state == "succeeded"
+                else (f"{error_code}: {error}" if error else error_code)
+            ),
+        )
+        human_log.close()
+        if state != "succeeded":
+            write_terminal_diagnostic(
+                job_dir,
+                job,
+                error_code=error_code,
+                state=state,
+                phase="fixture",
+                detail=error or message,
+                discarded_log_bytes=human_log.discarded_bytes,
+                exception=caught_exception,
+            )
     destination = _terminal_destination(job, state)
     if destination.exists():
         raise FixtureJobError(f"terminal diagnostics already exist: {destination.name}")

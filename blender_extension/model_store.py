@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 import uuid
 
+from .diagnostics import diagnostic_record
 from .runtime_setup import (
     CancellationToken,
     RuntimeLock,
@@ -710,6 +711,13 @@ class ModelStore:
         for path in existing:
             os.replace(path, destination / path.name)
         record = {
+            **diagnostic_record(
+                error_code=f"setup.model.{reason}",
+                category="setup",
+                state="cancelled" if "cancel" in reason else "failed",
+                phase="model-setup",
+                detail=detail.get("error", reason),
+            ),
             "reason": reason,
             "model_id": entry.id,
             "sha256": entry.artifact.sha256,

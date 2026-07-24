@@ -397,6 +397,8 @@ class RegistrationTests(unittest.TestCase):
                 "lingbot_map.trash_result",
                 "lingbot_map.trash_dense",
                 "lingbot_map.trash_diagnostic",
+                "lingbot_map.export_diagnostic_report",
+                "lingbot_map.copy_diagnostic_report",
                 "lingbot_map.restore_trash",
                 "lingbot_map.delete_trash",
             ],
@@ -417,6 +419,113 @@ class RegistrationTests(unittest.TestCase):
         self.assertTrue(all(panel.bl_category == "LingBot Map" for panel in panels))
         annotations = preferences.__annotations__
         self.assertEqual(set(annotations), {"runtime_root", "gpu_uuid", "offline_setup"})
+
+    def test_copy_diagnostic_report_is_the_only_clipboard_write_and_is_redacted(self):
+        source = (EXTENSION_ROOT / "ui.py").read_text(encoding="utf-8")
+        self.assertEqual(source.count(".clipboard ="), 1)
+        self.assertIn(
+            "class LINGBOTMAP_OT_copy_diagnostic_report",
+            source,
+        )
+        operator_class = next(
+            item
+            for item in self.extension.CLASSES
+            if item.__name__ == "LINGBOTMAP_OT_copy_diagnostic_report"
+        )
+        operator = operator_class()
+        operator.diagnostic_name = "job-" + "a" * 32 + "--failed"
+        operator.report = lambda *_args, **_kwargs: None
+        window_manager = SimpleNamespace(clipboard="unchanged")
+        report = SimpleNamespace(clipboard_text="redacted representation")
+        with (
+            mock.patch.object(
+                self.ui,
+                "_diagnostic_report_source",
+                return_value=Path("diagnostic"),
+            ),
+            mock.patch.object(
+                self.ui,
+                "build_portable_report",
+                return_value=report,
+            ) as build,
+        ):
+            result = operator.execute(
+                SimpleNamespace(window_manager=window_manager)
+            )
+        self.assertEqual(result, {"FINISHED"})
+        self.assertEqual(
+            window_manager.clipboard,
+            "redacted representation",
+        )
+        self.assertTrue(build.call_args.kwargs["redact"])
+
+    def test_failed_import_is_rolled_back_and_retained_with_stable_category(self):
+        operator_class = next(
+            item
+            for item in self.extension.CLASSES
+            if item.__name__ == "LINGBOTMAP_OT_import_result"
+        )
+        operator = operator_class()
+        operator.result_directory = "result"
+        operator.report = lambda *_args, **_kwargs: None
+        scene = SimpleNamespace(name="Scene")
+        with (
+            mock.patch.object(
+                self.ui,
+                "import_result",
+                side_effect=self.ui.ResultImportError(
+                    "invalid result"
+                ),
+            ),
+            mock.patch.object(
+                self.ui,
+                "_retain_ui_diagnostic",
+            ) as retain,
+            mock.patch.object(self.ui, "set_import_status"),
+        ):
+            result = operator.execute(
+                SimpleNamespace(scene=scene)
+            )
+        self.assertEqual(result, {"CANCELLED"})
+        self.assertEqual(
+            retain.call_args.kwargs["error_code"],
+            "import.transaction.failed",
+        )
+        self.assertEqual(
+            retain.call_args.kwargs["category"],
+            "import",
+        )
+        self.assertEqual(
+            retain.call_args.kwargs["state"],
+            "failed",
+        )
+
+    def test_unredacted_export_choice_resets_for_every_file_picker(self):
+        operator_class = next(
+            item
+            for item in self.extension.CLASSES
+            if item.__name__ == "LINGBOTMAP_OT_export_diagnostic_report"
+        )
+        operator = operator_class()
+        operator.diagnostic_name = "job-" + "a" * 32 + "--failed"
+        operator.include_sensitive_identity = True
+        operator.report = lambda *_args, **_kwargs: None
+        with tempfile.TemporaryDirectory() as temporary:
+            blend = Path(temporary) / "target.blend"
+            blend.touch()
+            self.bpy.data = SimpleNamespace(filepath=str(blend))
+            selected = []
+            result = operator.invoke(
+                SimpleNamespace(
+                    window_manager=SimpleNamespace(
+                        fileselect_add=selected.append
+                    )
+                ),
+                None,
+            )
+        self.assertEqual(result, {"RUNNING_MODAL"})
+        self.assertFalse(operator.include_sensitive_identity)
+        self.assertEqual(selected, [operator])
 
     def test_setup_panel_shows_model_source_license_checksum_and_size_before_actions(self):
         with mock.patch.object(

@@ -14,6 +14,7 @@ from typing import Any, Mapping
 import uuid
 
 from .gpu_capability import _runtime_command, _worker_environment
+from .diagnostics import diagnostic_record
 from .ipc import (
     IpcError,
     SCHEMA_VERSION,
@@ -1129,6 +1130,41 @@ class JobController:
             destination = diagnostics / f"{job_dir.name}--{reason}-{uuid.uuid4().hex[:8]}"
         os.replace(job_dir, destination)
         atomic_write_json(destination / "recovery.json", {"schema_version": SCHEMA_VERSION, "job_id": job_dir.name, "reason": reason})
+        category = "launch" if reason == "launch-failed" else "lifecycle"
+        try:
+            spec = read_json(destination / "job-spec.json")
+            target_scene = (
+                spec.get("target_scene", {})
+                if isinstance(spec, dict)
+                else {}
+            )
+        except (IpcError, OSError):
+            target_scene = {}
+        if not (destination / "diagnostic.json").exists():
+            atomic_write_json(
+                destination / "diagnostic.json",
+                diagnostic_record(
+                    error_code=(
+                        "launch.worker.failed"
+                        if reason == "launch-failed"
+                        else f"lifecycle.worker.{reason}"
+                    ),
+                    category=category,
+                    state=(
+                        "forced_termination"
+                        if reason == "forced-termination"
+                        else (
+                            "interrupted"
+                            if reason == "interrupted"
+                            else "failed"
+                        )
+                    ),
+                    phase=reason,
+                    job_id=job_dir.name,
+                    target_scene=target_scene,
+                    detail=reason,
+                ),
+            )
         return destination
 
     def request_cancel(self) -> bool:

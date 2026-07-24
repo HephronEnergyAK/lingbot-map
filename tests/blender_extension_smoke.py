@@ -24,6 +24,8 @@ PROJECT_LIFECYCLE_OPERATORS = (
     "trash_result",
     "trash_dense",
     "trash_diagnostic",
+    "export_diagnostic_report",
+    "copy_diagnostic_report",
     "restore_trash",
     "delete_trash",
 )

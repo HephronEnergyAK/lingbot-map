@@ -312,6 +312,9 @@ class RuntimeInstallerTests(unittest.TestCase):
             self.assertEqual(len(diagnostics), 1)
             record = json.loads((diagnostics[0] / "setup-diagnostic.json").read_text(encoding="utf-8"))
             self.assertEqual(record["reason"], "cancelled")
+            self.assertEqual(record["error_code"], "setup.runtime.cancelled")
+            self.assertEqual(record["category"], "setup")
+            self.assertEqual(record["state"], "cancelled")
 
     def test_cleanup_requires_confirmation_and_preserves_extension_and_job_refs(self):
         with tempfile.TemporaryDirectory() as temporary:

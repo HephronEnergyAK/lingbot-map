@@ -53,6 +53,19 @@ def main() -> int:
     )
     parser.add_argument("--job-nonce", help=argparse.SUPPRESS)
     arguments = parser.parse_args()
+
+    def guarded(runner, spec_path: Path, nonce: str) -> int:
+        try:
+            return runner(spec_path, nonce)
+        except Exception as exc:
+            try:
+                from .human_log import write_bootstrap_diagnostic
+
+                write_bootstrap_diagnostic(spec_path, exc)
+            except Exception:
+                pass
+            raise
+
     if arguments.identity:
         print(json.dumps(identity(), sort_keys=True, separators=(",", ":")))
         return 0
@@ -69,25 +82,41 @@ def main() -> int:
             parser.error("--fixture-job requires --job-nonce")
         from .fixture_job import run_fixture_job
 
-        return run_fixture_job(arguments.fixture_job, arguments.job_nonce)
+        return guarded(
+            run_fixture_job,
+            arguments.fixture_job,
+            arguments.job_nonce,
+        )
     if arguments.preflight_job is not None:
         if not arguments.job_nonce:
             parser.error("--preflight-job requires --job-nonce")
         from .preflight_job import run_preflight_job
 
-        return run_preflight_job(arguments.preflight_job, arguments.job_nonce)
+        return guarded(
+            run_preflight_job,
+            arguments.preflight_job,
+            arguments.job_nonce,
+        )
     if arguments.result_fixture_job is not None:
         if not arguments.job_nonce:
             parser.error("--result-fixture-job requires --job-nonce")
         from .result_fixture_job import run_result_fixture_job
 
-        return run_result_fixture_job(arguments.result_fixture_job, arguments.job_nonce)
+        return guarded(
+            run_result_fixture_job,
+            arguments.result_fixture_job,
+            arguments.job_nonce,
+        )
     if arguments.reconstruction_job is not None:
         if arguments.job_nonce is None:
             parser.error("--reconstruction-job requires --job-nonce")
         from .reconstruction_job import run_reconstruction_job
 
-        return run_reconstruction_job(arguments.reconstruction_job, arguments.job_nonce)
+        return guarded(
+            run_reconstruction_job,
+            arguments.reconstruction_job,
+            arguments.job_nonce,
+        )
     parser.error("a validated Job Control Envelope is required")
     return 2
 

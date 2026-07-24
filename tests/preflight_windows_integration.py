@@ -91,7 +91,7 @@ def main() -> int:
     timestamps = (terminal / "timestamps.f64le").read_bytes()
     expected_files = {
         "events.jsonl", "job-control.json", "job-spec.json", "preflight-result.json",
-        "status.json", "timestamps.f64le", "worker.pid.json",
+        "status.json", "timestamps.f64le", "worker.pid.json", "human.log",
     }
     if {item.name for item in terminal.iterdir()} != expected_files:
         raise RuntimeError("terminal preflight retained unexpected files or pixels")

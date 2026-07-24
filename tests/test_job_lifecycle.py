@@ -10,6 +10,7 @@ from types import ModuleType, SimpleNamespace
 import sys
 import unittest
 from unittest import mock
+import uuid
 
 if "bpy" not in sys.modules:
     bpy = ModuleType("bpy")
@@ -170,6 +171,88 @@ class ProjectBindingTests(unittest.TestCase):
             root = ensure_project_layout(blend)
             self.assertEqual(root, project_result_root(blend))
             self.assertEqual({item.name for item in root.iterdir()}, {".jobs", "results", "diagnostics"})
+
+    def test_launch_and_recovery_failures_retain_stable_diagnostic_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            blend = Path(temporary) / "target.blend"
+            blend.touch()
+            root = ensure_project_layout(blend)
+            for suffix, expected in (
+                ("launch-failed", ("launch.worker.failed", "launch", "failed")),
+                (
+                    "forced-termination",
+                    (
+                        "lifecycle.worker.forced-termination",
+                        "lifecycle",
+                        "forced_termination",
+                    ),
+                ),
+            ):
+                job_id = "job-" + (
+                    "a" if suffix == "launch-failed" else "b"
+                ) * 32
+                job_dir = root / ".jobs" / job_id
+                job_dir.mkdir()
+                atomic_write_json(
+                    job_dir / "job-spec.json",
+                    {
+                        "schema_version": "1.0.0",
+                        "job_id": job_id,
+                        "target_scene": {
+                            "blend_path": str(blend),
+                            "scene_uuid": str(uuid.uuid4()),
+                            "scene_name": "Scene",
+                        },
+                    },
+                )
+                destination = JobController._recover_directory(
+                    job_dir,
+                    suffix,
+                )
+                record = json.loads(
+                    (destination / "diagnostic.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(
+                    (
+                        record["error_code"],
+                        record["category"],
+                        record["state"],
+                    ),
+                    expected,
+                )
+                self.assertEqual(record["job_id"], job_id)
+
+            bootstrap_id = "job-" + "c" * 32
+            bootstrap_dir = root / ".jobs" / bootstrap_id
+            bootstrap_dir.mkdir()
+            atomic_write_json(
+                bootstrap_dir / "job-spec.json",
+                {
+                    "schema_version": "1.0.0",
+                    "job_id": bootstrap_id,
+                    "target_scene": {},
+                },
+            )
+            atomic_write_json(
+                bootstrap_dir / "diagnostic.json",
+                {
+                    "schema_version": "1.0.0",
+                    "error_code": "launch.worker.bootstrap-failed",
+                },
+            )
+            destination = JobController._recover_directory(
+                bootstrap_dir,
+                "interrupted",
+            )
+            preserved = json.loads(
+                (destination / "diagnostic.json").read_text("utf-8")
+            )
+            self.assertEqual(
+                preserved["error_code"],
+                "launch.worker.bootstrap-failed",
+            )
 
     def test_invalid_recovered_control_neither_moves_staging_nor_signals_a_pid(self):
         with tempfile.TemporaryDirectory() as temporary:

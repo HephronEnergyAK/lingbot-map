@@ -21,6 +21,12 @@ from .runtime import (
 )
 from .model_store import ModelStore, bundled_model_catalog
 from .runtime_setup import RuntimeSetupError, default_managed_root
+from .diagnostics import (
+    DiagnosticReportError,
+    build_portable_report,
+    export_portable_report,
+    retain_extension_diagnostic,
+)
 from .gpu_capability import (
     cancel_gpu_capability,
     discover_physical_gpus,
@@ -44,6 +50,7 @@ from .job_lifecycle import (
     capture_source_draft_path,
     duplicate_scene_uuid_groups,
     ensure_unique_scene_uuid,
+    ensure_project_layout,
     get_job_snapshot,
     latest_successful_preflight,
     normalized_blend_path,
@@ -108,6 +115,47 @@ _project_inventory_error = ""
 
 def _project_key(blend_path: str) -> str:
     return str(normalized_blend_path(blend_path)).casefold()
+
+
+def _retain_ui_diagnostic(
+    *,
+    category: str,
+    state: str,
+    error_code: str,
+    phase: str,
+    detail: object,
+    scene=None,
+) -> None:
+    """Best-effort durable evidence; never mask the originating UI failure."""
+
+    blend_path = str(getattr(bpy.data, "filepath", ""))
+    if not blend_path:
+        return
+    current_scene = scene or getattr(
+        getattr(bpy, "context", None),
+        "scene",
+        None,
+    )
+    target_scene = {
+        "blend_path": blend_path,
+        "scene_uuid": str(
+            getattr(current_scene, "lingbot_map_scene_uuid", "")
+        ),
+        "scene_name": str(getattr(current_scene, "name", "")),
+    }
+    try:
+        retain_extension_diagnostic(
+            ensure_project_layout(blend_path),
+            error_code=error_code,
+            category=category,
+            state=state,
+            phase=phase,
+            detail=detail,
+            target_scene=target_scene,
+        )
+        refresh_project_inventory(blend_path)
+    except (DiagnosticReportError, OSError, RuntimeError, ValueError):
+        pass
 
 
 def clear_project_inventory() -> None:
@@ -719,15 +767,39 @@ class LINGBOTMAP_OT_import_result(bpy.types.Operator):
                 context=context,
             )
         except ResultImportCancelled as exc:
+            _retain_ui_diagnostic(
+                category="import",
+                state="cancelled",
+                error_code="import.transaction.cancelled",
+                phase="result-import",
+                detail=exc,
+                scene=context.scene,
+            )
             set_import_status(str(exc))
             self.report({"WARNING"}, str(exc))
             return {"CANCELLED"}
         except (ImportCapacityError, ResultImportError, OSError, MemoryError) as exc:
+            _retain_ui_diagnostic(
+                category="import",
+                state="failed",
+                error_code="import.transaction.failed",
+                phase="result-import",
+                detail=exc,
+                scene=context.scene,
+            )
             set_import_status(str(exc))
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         except Exception as exc:
             message = f"Import failed and was rolled back: {type(exc).__name__}: {exc}"
+            _retain_ui_diagnostic(
+                category="import",
+                state="failed",
+                error_code="import.transaction.rollback-failed",
+                phase="result-import",
+                detail=message,
+                scene=context.scene,
+            )
             set_import_status(message)
             self.report({"ERROR"}, message)
             return {"CANCELLED"}
@@ -1238,7 +1310,17 @@ def _new_lifecycle_plan(action: str, names: tuple[str, ...]):
             "Save the Blender file before managing Project content"
         )
     lifecycle = ProjectLifecycle(blend_path)
-    plan = lifecycle.plan(action, names)
+    try:
+        plan = lifecycle.plan(action, names)
+    except (ProjectLifecycleError, OSError) as exc:
+        _retain_ui_diagnostic(
+            category="lifecycle",
+            state="failed",
+            error_code="lifecycle.plan.failed",
+            phase=action,
+            detail=exc,
+        )
+        raise
     key = _store_lifecycle_plan(blend_path, lifecycle, plan)
     return blend_path, plan, key
 
@@ -1246,7 +1328,17 @@ def _new_lifecycle_plan(action: str, names: tuple[str, ...]):
 def _execute_lifecycle_plan(key: str):
     blend_path = str(getattr(bpy.data, "filepath", ""))
     lifecycle, plan = _consume_lifecycle_plan(key, blend_path)
-    outcome = lifecycle.execute(plan)
+    try:
+        outcome = lifecycle.execute(plan)
+    except (ProjectLifecycleError, OSError) as exc:
+        _retain_ui_diagnostic(
+            category="lifecycle",
+            state="failed",
+            error_code="lifecycle.execute.failed",
+            phase=plan.action,
+            detail=exc,
+        )
+        raise
     refresh_project_inventory(blend_path)
     return outcome
 
@@ -1485,6 +1577,123 @@ class LINGBOTMAP_OT_trash_diagnostic(bpy.types.Operator):
             {"INFO"},
             f"Moved {outcome.item_count} Diagnostics to Project Trash",
         )
+        return {"FINISHED"}
+
+
+def _diagnostic_report_source(name: str) -> Path:
+    blend_path = str(getattr(bpy.data, "filepath", ""))
+    if not blend_path:
+        raise DiagnosticReportError(
+            "diagnostic-export-unsaved-project",
+            "Save the Blender file before exporting Diagnostics",
+        )
+    return project_result_root(blend_path) / "diagnostics" / name
+
+
+def _diagnostic_versions() -> dict[str, object]:
+    return {
+        "extension": "0.1.0",
+        "blender": str(getattr(bpy.app, "version_string", "unknown")),
+    }
+
+
+class LINGBOTMAP_OT_export_diagnostic_report(bpy.types.Operator):
+    bl_idname = "lingbot_map.export_diagnostic_report"
+    bl_label = "Export Diagnostic Report"
+    bl_description = (
+        "Export a bounded allowlisted ZIP; sensitive identity is redacted "
+        "unless explicitly enabled for this export"
+    )
+
+    diagnostic_name: StringProperty(options={"HIDDEN"})
+    filepath: StringProperty(
+        name="Diagnostic Report",
+        subtype="FILE_PATH",
+    )
+    filter_glob: StringProperty(default="*.zip", options={"HIDDEN"})
+    include_sensitive_identity: BoolProperty(
+        name="Include unredacted identity for this export",
+        description=(
+            "Include local usernames, machine names, absolute paths, "
+            "environment data, source identifiers, and full GPU UUIDs"
+        ),
+        default=False,
+    )
+
+    def invoke(self, context, _event):
+        blend_path = Path(str(getattr(bpy.data, "filepath", "")))
+        if not blend_path.name:
+            self.report({"ERROR"}, "Save the Blender file before exporting")
+            return {"CANCELLED"}
+        # Blender may remember an operator's last-used properties. Sensitive
+        # identity is nevertheless opt-in for every individual export.
+        self.include_sensitive_identity = False
+        self.filepath = str(
+            blend_path.parent
+            / f"{self.diagnostic_name}-diagnostic-report.zip"
+        )
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def draw(self, _context):
+        self.layout.label(
+            text=(
+                "Default redaction: users, machine, absolute paths, "
+                "environment, source identity, full GPU UUID"
+            ),
+            icon="INFO",
+        )
+        self.layout.prop(self, "include_sensitive_identity")
+        if self.include_sensitive_identity:
+            self.layout.label(
+                text="This one report will contain sensitive local identity",
+                icon="ERROR",
+            )
+
+    def execute(self, _context):
+        try:
+            outcome = export_portable_report(
+                _diagnostic_report_source(self.diagnostic_name),
+                self.filepath,
+                redact=not self.include_sensitive_identity,
+                versions=_diagnostic_versions(),
+            )
+        except (DiagnosticReportError, OSError, ValueError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"},
+            (
+                "Exported redacted Diagnostic Report"
+                if not self.include_sensitive_identity
+                else "Exported explicitly unredacted Diagnostic Report"
+            )
+            + f" ({outcome['length']} bytes)",
+        )
+        return {"FINISHED"}
+
+
+class LINGBOTMAP_OT_copy_diagnostic_report(bpy.types.Operator):
+    bl_idname = "lingbot_map.copy_diagnostic_report"
+    bl_label = "Copy Diagnostic Report"
+    bl_description = (
+        "Copy only the bounded redacted report representation to the clipboard"
+    )
+
+    diagnostic_name: StringProperty(options={"HIDDEN"})
+
+    def execute(self, context):
+        try:
+            report = build_portable_report(
+                _diagnostic_report_source(self.diagnostic_name),
+                redact=True,
+                versions=_diagnostic_versions(),
+            )
+        except (DiagnosticReportError, OSError, ValueError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        context.window_manager.clipboard = report.clipboard_text
+        self.report({"INFO"}, "Copied redacted Diagnostic Report")
         return {"FINISHED"}
 
 
@@ -2365,6 +2574,19 @@ class LINGBOTMAP_PT_diagnostics(_LINGBOTMAP_LifecyclePanel, bpy.types.Panel):
                 box.label(text=item.detail or "Unrecognized; no action")
                 continue
             box.label(text="Retained by default")
+            report_actions = box.row(align=True)
+            export = report_actions.operator(
+                LINGBOTMAP_OT_export_diagnostic_report.bl_idname,
+                text="Export Report",
+                icon="EXPORT",
+            )
+            export.diagnostic_name = item.name
+            copy = report_actions.operator(
+                LINGBOTMAP_OT_copy_diagnostic_report.bl_idname,
+                text="Copy Report",
+                icon="COPYDOWN",
+            )
+            copy.diagnostic_name = item.name
             if lifecycle_actions_enabled:
                 action = box.operator(
                     LINGBOTMAP_OT_trash_diagnostic.bl_idname,
@@ -2433,6 +2655,8 @@ CLASSES = (
     LINGBOTMAP_OT_trash_result,
     LINGBOTMAP_OT_trash_dense,
     LINGBOTMAP_OT_trash_diagnostic,
+    LINGBOTMAP_OT_export_diagnostic_report,
+    LINGBOTMAP_OT_copy_diagnostic_report,
     LINGBOTMAP_OT_restore_trash,
     LINGBOTMAP_OT_delete_trash,
     LINGBOTMAP_PT_setup,

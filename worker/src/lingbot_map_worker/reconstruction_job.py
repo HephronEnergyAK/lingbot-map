@@ -41,6 +41,7 @@ from .gpu_profiles import (
     resolve_profile,
 )
 from .ipc import read_json
+from .human_log import HumanLogSession, write_terminal_diagnostic
 from .model_store_compat import is_reparse_point
 from .long_pipeline import WindowedReconstructionPipeline
 from .production_model import (
@@ -241,6 +242,12 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
     state, message, error, return_code = (
         "failed", "Reconstruction Job failed", None, 1
     )
+    caught_exception = None
+    human_log = HumanLogSession(
+        job_dir,
+        on_discard=store.log_truncated,
+        on_warning=store.structured_warning,
+    ).start()
     try:
         _set_below_normal_priority()
         _install_audit_policy()
@@ -568,6 +575,7 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
     except (PipelineCancelled, ResultCancelled, SkyMaskCancelled):
         state, message, return_code = "cancelled", "Reconstruction Job cancelled", 2
     except Exception as exc:
+        caught_exception = exc
         try:
             classification = classify_cuda_failure(exc)
         except Exception:
@@ -580,6 +588,8 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
             try:
                 sink.abort(state)
             except Exception as dense_abort_error:
+                if caught_exception is None:
+                    caught_exception = dense_abort_error
                 if error is None:
                     error = (
                         f"{type(dense_abort_error).__name__}: {dense_abort_error}"
@@ -588,6 +598,8 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
             try:
                 sky_session.abort()
             except Exception as sky_abort_error:
+                if caught_exception is None:
+                    caught_exception = sky_abort_error
                 if error is None:
                     error = (
                         f"{type(sky_abort_error).__name__}: {sky_abort_error}"
@@ -595,7 +607,28 @@ def run_reconstruction_job(spec_path: Path, nonce: str) -> int:
         stop.set()
         if heartbeat.is_alive():
             heartbeat.join(timeout=6)
-        store.terminal(state, message, error=error)
+        error_code = f"pipeline.reconstruction.{state}"
+        store.terminal(
+            state,
+            message,
+            error=(
+                None
+                if state == "succeeded"
+                else (f"{error_code}: {error}" if error else error_code)
+            ),
+        )
+        human_log.close()
+        if state != "succeeded":
+            write_terminal_diagnostic(
+                job_dir,
+                job,
+                error_code=error_code,
+                state=state,
+                phase=store.diagnostic_phase,
+                detail=error or message,
+                discarded_log_bytes=human_log.discarded_bytes,
+                exception=caught_exception,
+            )
     destination = _terminal_destination(job, state)
     if destination.exists():
         raise ReconstructionJobError(f"terminal diagnostics already exist: {destination.name}")

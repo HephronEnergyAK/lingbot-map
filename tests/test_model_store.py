@@ -394,7 +394,13 @@ class ModelAcquisitionTests(unittest.TestCase):
                 store.acquire("fixture-model", offline=False, online_access=True)
             self.assertFalse(store.model_path(fixture.entry).exists())
             diagnostic = next(store.diagnostics_root.glob("*/model-download-diagnostic.json"))
-            self.assertEqual(json.loads(diagnostic.read_text(encoding="utf-8"))["reason"], "checksum-mismatch")
+            record = json.loads(diagnostic.read_text(encoding="utf-8"))
+            self.assertEqual(record["reason"], "checksum-mismatch")
+            self.assertEqual(
+                record["error_code"],
+                "setup.model.checksum-mismatch",
+            )
+            self.assertEqual(record["category"], "setup")
 
 
 class LocalImportTests(unittest.TestCase):

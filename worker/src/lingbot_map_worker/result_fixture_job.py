@@ -26,6 +26,7 @@ from .fixture_job import (
 )
 from .gpu_lease import sha256_file
 from .ipc import read_json
+from .human_log import HumanLogSession, write_terminal_diagnostic
 from .result_bundle import ResultCancelled
 from .result_pipeline import (
     AlignedPrediction,
@@ -114,6 +115,12 @@ def run_result_fixture_job(spec_path: Path, nonce: str) -> int:
         daemon=True,
     )
     state, message, error, return_code = "failed", "Result Fixture failed", None, 1
+    caught_exception = None
+    human_log = HumanLogSession(
+        job_dir,
+        on_discard=store.log_truncated,
+        on_warning=store.structured_warning,
+    ).start()
     try:
         _set_below_normal_priority()
         _install_audit_policy()
@@ -172,12 +179,34 @@ def run_result_fixture_job(spec_path: Path, nonce: str) -> int:
     except ResultCancelled:
         state, message, return_code = "cancelled", "Result Fixture cancelled before commit", 2
     except Exception as exc:
+        caught_exception = exc
         error = f"{type(exc).__name__}: {exc}"[:16384]
     finally:
         stop.set()
         if heartbeat.is_alive():
             heartbeat.join(timeout=6)
-        store.terminal(state, message, error=error)
+        error_code = f"pipeline.result-fixture.{state}"
+        store.terminal(
+            state,
+            message,
+            error=(
+                None
+                if state == "succeeded"
+                else (f"{error_code}: {error}" if error else error_code)
+            ),
+        )
+        human_log.close()
+        if state != "succeeded":
+            write_terminal_diagnostic(
+                job_dir,
+                job,
+                error_code=error_code,
+                state=state,
+                phase=store.diagnostic_phase,
+                detail=error or message,
+                discarded_log_bytes=human_log.discarded_bytes,
+                exception=caught_exception,
+            )
     destination = _terminal_destination(job, state).with_name(
         f"{job['job_id']}--result-fixture-{state}"
     )
