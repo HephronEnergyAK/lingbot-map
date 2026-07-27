@@ -3,8 +3,8 @@
   "corpus_id": "lingbot-map-release-corpus-0.1.0",
   "privacy": {
     "personal_capture_sources": false,
-    "repository_media_only": true,
-    "policy": "No private user Capture Source may be copied into this corpus, a test artifact, a release package, or CI storage."
+    "repository_media_only": false,
+    "policy": "No private user Capture Source may be copied into this corpus, a test artifact, a release package, or CI storage. Approved external benchmark media remains in caller-controlled scratch storage under its own recorded license."
   },
   "storage": {
     "checked_in_media": false,
@@ -95,15 +95,42 @@
       "generated_sha256": "7ea874def95e1ef1466f08c2349deb5679bd4b9b87d0743890a7d77574f6cf40"
     },
     {
-      "id": "real-windowed-above-3000",
-      "status": "blocked-external",
+      "id": "real-kitti-odometry-00-windowed-3001",
+      "status": "ready-external",
       "classification": "windowed",
-      "presentation_frames": ">3000",
-      "provenance": null,
-      "acquisition_recipe": null,
-      "license": null,
-      "storage": null,
-      "blocker": "No available real capture above 3000 frames has explicit redistribution rights and complete provenance."
+      "presentation_frames": 3001,
+      "provenance": {
+        "official_dataset": "KITTI Visual Odometry / SLAM Evaluation 2012",
+        "source_contract_path": "release_corpus/kitti-odometry-00-source.json",
+        "source_contract_sha256": "fe39e32be2ff6a63df8a6200495f385b861f7e88a3414a91b55350503bef490a",
+        "sequence": "00",
+        "camera": "image_0",
+        "source_frame_range": [0, 3000],
+        "source_archive_sha256": "94963792b9c48e37191583ba44608304713ae018a38735133f1435665f3ada12",
+        "ordered_member_sha256_manifest": "a7086a49a8238c2ba5007505489430a10d282d316186771059075699444f49c0",
+        "temporal_sampling": false
+      },
+      "acquisition_recipe": "Download the exact official archive and run python scripts/acquire_kitti_release_fixture.py <archive> <empty-scratch-output>.",
+      "license": {
+        "spdx": "CC-BY-NC-SA-3.0",
+        "evidence_path": "release_corpus/licenses/KITTI-CC-BY-NC-SA-3.0.md",
+        "evidence_sha256": "52ec921de2a59b2028215d5cb10d6fcac584c7fca1b132989def0f886aeda871",
+        "official_evidence_url": "https://www.cvlibs.net/datasets/kitti/",
+        "license_deed_url": "https://creativecommons.org/licenses/by-nc-sa/3.0/",
+        "attribution": "Andreas Geiger, Philip Lenz, Christoph Stiller, and Raquel Urtasun; KITTI Vision Benchmark Suite",
+        "constraints": [
+          "attribution-required",
+          "non-commercial-only",
+          "share-alike-3.0-required-for-derivatives"
+        ]
+      },
+      "storage": {
+        "checked_in": false,
+        "location": "caller-supplied release-suite scratch storage",
+        "included_in_extension_or_worker": false
+      },
+      "generated_sha256": "8052a7b8f9634b9a983260e046d3f000a22955f1c2d7f0232e6566716b7187ef",
+      "generated_bytes": 142841512
     }
   ],
   "unapproved_external_candidates": [
@@ -125,7 +152,7 @@
     "classification": "windowed",
     "cadence": "release-candidate-or-milestone-only",
     "generated_sha256": "408aca12995e8913c013198cd721631252aca51869939b4f368de64bd0ce6f22",
-    "real_capture_status": "blocked-missing-explicit-license"
+    "real_capture_status": "ready-external-kitti-3001"
   },
   "oracles": {
     "exact": "release_corpus/exact-oracles.json",
@@ -185,8 +212,8 @@
   "release_gates": [
     {
       "id": "real-windowed-capture-rights",
-      "status": "blocked-external",
-      "resolution": "Supply a real >3000-frame Continuous Take with explicit redistribution license, acquisition provenance, recipe, checksum, classification, and approved storage."
+      "status": "ready",
+      "resolution": "Resolved by the external KITTI sequence 00 image_0 frames 000000-003000 fixture, with CC-BY-NC-SA-3.0 evidence, exact source and output checksums, deterministic acquisition recipe, Windowed classification, and caller-supplied scratch storage."
     },
     {
       "id": "ada-release-suite",

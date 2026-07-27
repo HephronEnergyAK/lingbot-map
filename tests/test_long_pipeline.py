@@ -242,6 +242,51 @@ class LongPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(WindowAlignmentError, "no valid"):
             RollingWindowAligner().estimate(previous, current)
 
+    def test_float32_pose_noise_uses_documented_rigid_tolerance(self):
+        predictor = Predictor()
+        window = tuple(
+            type(
+                "F",
+                (),
+                {
+                    "frame_index": index,
+                    "pts_seconds": index / 25,
+                    "canonical": canonical(None),
+                },
+            )
+            for index in range(2)
+        )
+        baseline = list(predictor.predict(window, cancel=lambda: False))
+
+        def with_scale_error(value, error):
+            matrix = value.world_to_camera_opencv.copy()
+            matrix[0, 0] += error
+            return AlignedPrediction(
+                value.frame_index,
+                value.frame_type,
+                value.source_pts_seconds,
+                np.ascontiguousarray(matrix, dtype="<f8"),
+                value.model_intrinsics,
+                value.depth,
+                value.confidence,
+                value.rgb,
+            )
+
+        float32_noise = [
+            with_scale_error(item, 2.0e-7) for item in baseline
+        ]
+        transform = RollingWindowAligner().estimate(
+            float32_noise,
+            float32_noise,
+        )
+        self.assertAlmostEqual(transform.scale, 1.0)
+
+        malformed = [
+            with_scale_error(item, 1.0e-5) for item in baseline
+        ]
+        with self.assertRaisesRegex(WindowAlignmentError, "orthonormal"):
+            RollingWindowAligner().estimate(malformed, malformed)
+
     def test_cancellation_closes_predictor_and_never_finishes(self):
         checks = 0
 

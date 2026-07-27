@@ -29,6 +29,8 @@ from .sky_masking import SkyMaskSession
 
 
 CancelCheck = Callable[[], bool]
+# Keep final model-pose acceptance identical to the release neural invariant.
+MODEL_ROTATION_ATOL = 1e-6
 
 
 class ResultPipelineError(ValueError):
@@ -231,9 +233,18 @@ def _validate_predictions(
         if not np.allclose(w2c[3], (0, 0, 0, 1), atol=1e-9, rtol=0):
             raise ResultPipelineError("world_to_camera_opencv has a malformed homogeneous row")
         rotation = w2c[:3, :3]
-        if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-7, rtol=0):
+        if not np.allclose(
+            rotation.T @ rotation,
+            np.eye(3),
+            atol=MODEL_ROTATION_ATOL,
+            rtol=0,
+        ):
             raise ResultPipelineError("world_to_camera_opencv rotation is not orthonormal")
-        if not math.isclose(float(np.linalg.det(rotation)), 1.0, abs_tol=1e-7):
+        if not math.isclose(
+            float(np.linalg.det(rotation)),
+            1.0,
+            abs_tol=MODEL_ROTATION_ATOL,
+        ):
             raise ResultPipelineError("world_to_camera_opencv is reflected or non-rigid")
         if (
             intrinsics[0, 0] <= 0

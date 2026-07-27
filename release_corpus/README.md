@@ -27,6 +27,42 @@ The output directory must be empty. The generator records the exact Python,
 PyAV, NumPy, and FFmpeg library versions so a toolchain drift cannot silently
 replace a golden.
 
+## Official KITTI windowed fixture
+
+The real Windowed fixture uses every `image_0` frame from 000000 through
+003000 of sequence 00 in the official KITTI Visual Odometry / SLAM Evaluation
+2012 grayscale archive. The 3,001-frame selection is a new Continuous Take:
+frames remain in source order at 10 fps, with no temporal sampling. Only a
+deterministic spatial fit to 518 by 158 pixels is applied before deterministic
+CRF-0 H.264 encoding.
+
+Download `data_odometry_gray.zip` from the archive URL recorded in
+`kitti-odometry-00-source.json`, keep it outside the repository, and run:
+
+```powershell
+python scripts/acquire_kitti_release_fixture.py `
+  C:\path\to\data_odometry_gray.zip `
+  C:\tmp\lingbot-map-kitti-windowed
+python scripts/validate_release_corpus.py `
+  --benchmark-fixture-manifest `
+  C:\tmp\lingbot-map-kitti-windowed\benchmark-fixture-manifest.json
+```
+
+The source archive, derived MP4, and acquisition manifest stay in
+caller-supplied release-suite scratch storage. They are not included in the
+Extension, Worker, repository, or ordinary CI artifacts. KITTI is separately
+licensed under `CC-BY-NC-SA-3.0`: attribution, non-commercial use, and
+ShareAlike 3.0 for derivatives are required. See
+`licenses/KITTI-CC-BY-NC-SA-3.0.md` for the captured evidence and attribution.
+
+The qualified RTX 5090 Draft calibration processed all 3,001 frames through
+the real Windowed pipeline in 62 overlap boundaries. Its fixed v1 heuristic
+reported 61 non-blocking Quality Warnings, which are preserved in the
+calibration evidence and are not converted into a rejection gate. Every
+boundary still supplied valid overlap data and a finite legal similarity
+transform; the warning thresholds remain explicitly uncalibrated under
+ADR 0028.
+
 ## Layered oracles
 
 `exact-oracles.json` is bit-exact for deterministic non-neural boundaries:
@@ -72,13 +108,15 @@ fresh-install splash without changing the user's preferences:
 
 ## Current external release gates
 
-The repository contains a redistributable real 286-frame streaming source
-under the root Apache-2.0 license. It does not yet contain a real capture above
-3,000 frames with explicit redistribution rights. The upstream demo
-`indoor_travel.MP4` is recorded only as an unapproved candidate because its
-dataset exposes no explicit license; it must not be downloaded into CI,
-redistributed, or treated as release evidence.
+The corpus has two licensed real sources: the repository Apache-2.0
+286-frame courthouse sequence for Streaming and the externally stored
+CC-BY-NC-SA-3.0 KITTI 3,001-frame sequence for Windowed. The upstream demo
+`indoor_travel.MP4` remains only an unapproved candidate because its dataset
+exposes no explicit license; it must not be downloaded into CI, redistributed,
+or treated as release evidence.
 
-Until a licensed long capture is supplied and the complete suite passes on an
-Ada consumer GPU with at least 16 GB, structural validation succeeds but
-`--release` validation fails with those exact blockers.
+The remaining external release gate is the complete native suite on an Ada
+consumer GPU with at least 16 GB, including the calibrated neural ranges and
+the behavior when higher Profiles do not qualify. Structural validation
+succeeds, but `--release` continues to fail on that exact gate until real Ada
+evidence exists.

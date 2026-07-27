@@ -45,6 +45,7 @@ if np is not None:
         IncrementalBundleResultSink,
         IncrementalResultRequest,
         ResultBuildRequest,
+        ResultPipelineError,
         ResultProfile,
         _filter_frame,
         build_reconstruction_result,
@@ -160,6 +161,27 @@ class ResultFixture:
 
 @unittest.skipIf(np is None, "Worker NumPy stack is not installed")
 class FilteringAndCoordinateTests(unittest.TestCase):
+    def test_result_pipeline_uses_documented_model_rotation_tolerance(self):
+        for error, succeeds in ((2.0e-7, True), (1.0e-5, False)):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as temporary:
+                fixture = ResultFixture(Path(temporary))
+                w2c = np.eye(4, dtype="<f8")
+                w2c[0, 0] += error
+                fixture.request = ResultBuildRequest(
+                    **{
+                        **fixture.request.__dict__,
+                        "predictions": (_prediction(0, w2c=w2c),),
+                    }
+                )
+                if succeeds:
+                    fixture.build()
+                else:
+                    with self.assertRaisesRegex(
+                        ResultPipelineError,
+                        "orthonormal",
+                    ):
+                        fixture.build()
+
     def test_filtering_precedes_unprojection_and_depth_uses_confidence_survivors(self):
         with tempfile.TemporaryDirectory() as temporary:
             fixture = ResultFixture(Path(temporary), confidence_cutoff_percent=50, depth_cutoff_percent=50)

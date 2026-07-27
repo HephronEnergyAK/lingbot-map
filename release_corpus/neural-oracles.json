@@ -76,12 +76,56 @@
         "cross_architecture_gate": "The complete suite, including these ranges, must still pass on an Ada consumer GPU with at least 16 GB before 1.0.0."
       }
     },
-    "real-windowed-above-3000": {
-      "status": "blocked-missing-redistribution-rights",
-      "expected_frame_count": null,
-      "source_sha256": null,
-      "ranges": null,
-      "blocker": "Acquire an explicitly redistributable real Continuous Take above 3000 frames before calibration."
+    "real-kitti-odometry-00-windowed-3001": {
+      "status": "ready",
+      "expected_frame_count": 3001,
+      "source_sha256": "8052a7b8f9634b9a983260e046d3f000a22955f1c2d7f0232e6566716b7187ef",
+      "ranges": {
+        "depth_p05": [0.22, 0.89],
+        "depth_median": [1.22, 4.91],
+        "depth_p95": [8.0, 32.1],
+        "confidence_p05": [0.5, 2.01],
+        "confidence_median": [2.35, 9.43],
+        "confidence_p95": [9.42, 37.8],
+        "camera_path_extent": [105.0, 424.0],
+        "rotation_step_p95_degrees": [1.61, 6.48]
+      },
+      "calibration": {
+        "date": "2026-07-27",
+        "fixture": "derived licensed KITTI odometry sequence 00 image_0 frames 000000-003000 MP4",
+        "profile": "Draft",
+        "pipeline_mode": "windowed",
+        "qualified_hardware_evidence": "Issue #10 commit c329e8269e5ec01fee485e36f8e87d4a7b06283f qualified Draft, Balanced, and High on this RTX 5090 reference GPU.",
+        "reference_system": {
+          "gpu": "NVIDIA GeForce RTX 5090",
+          "gpu_uuid": "GPU-3dd69ad9-06be-796b-5f6a-0a9159cd288c",
+          "compute_capability": [12, 0],
+          "driver": "610.47",
+          "torch": "2.11.0+cu130",
+          "cuda": "13.0",
+          "runtime_id": "7b9cb75d26fc9d1cb33a92526e60498d4b3a7654ffa64653c7bb90ca07a7c5dc",
+          "model_id": "lingbot-map-long",
+          "model_sha256": "832bc82cbae0bc9bbe946ef5ee1f7226abd8c0e183ccf8beddbb3d133576f409"
+        },
+        "observed_metrics": {
+          "depth_p05": 0.4420950412750244,
+          "depth_median": 2.452439785003662,
+          "depth_p95": 16.000978469848633,
+          "confidence_p05": 1.0000114440917969,
+          "confidence_median": 4.713902950286865,
+          "confidence_p95": 18.850996017456055,
+          "camera_path_extent": 211.79444350987293,
+          "rotation_step_p95_degrees": 3.2357513423550928
+        },
+        "window_alignment": {
+          "rule_version": "1.0.0",
+          "boundary_count": 62,
+          "quality_warning_count": 61,
+          "boundary_metrics_sha256": "619ff0c3d02751175d7b16d8dc5a0eea1ad23ce8502c14f94647324dd7383737"
+        },
+        "envelope_policy": "Rounded outward from one-half to twice the qualified Blackwell reference measurement. This rejects collapsed or explosive outputs while allowing architecture-level numeric variation.",
+        "cross_architecture_gate": "The complete suite, including these ranges and all Windowed alignment evidence, must still pass on an Ada consumer GPU with at least 16 GB before 1.0.0."
+      }
     }
   }
 }

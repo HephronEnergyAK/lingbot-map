@@ -21,7 +21,14 @@ if np is not None:
     from scripts import build_release_corpus
     from scripts.calibrate_neural_oracle import (
         CalibrationError,
+        _create_pipeline,
         _prepare_output,
+    )
+    from lingbot_map_worker.long_pipeline import (
+        WindowedReconstructionPipeline,
+    )
+    from lingbot_map_worker.short_pipeline import (
+        ShortReconstructionPipeline,
     )
     from scripts.validate_neural_oracle import validate_neural_output
     from scripts.validate_release_corpus import (
@@ -45,20 +52,67 @@ class ReleaseCorpusTests(unittest.TestCase):
                 _prepare_output(output)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "user data")
 
+    def test_neural_calibration_selects_pipeline_at_exact_boundary(self):
+        short_factory = lambda *_args: None
+        window_factory = lambda *_args: None
+        self.assertIsInstance(
+            _create_pipeline(3000, short_factory, window_factory),
+            ShortReconstructionPipeline,
+        )
+        self.assertIsInstance(
+            _create_pipeline(3001, short_factory, window_factory),
+            WindowedReconstructionPipeline,
+        )
+
     def test_structural_oracles_pass_and_release_gate_names_are_exact(self):
         result = validate()
         self.assertEqual(result["structural_validation"], "passed")
         self.assertFalse(result["release_ready"])
         self.assertEqual(
             [item["id"] for item in result["blockers"]],
-            [
-                "real-windowed-capture-rights",
-                "ada-release-suite",
-            ],
+            ["ada-release-suite"],
         )
         with self.assertRaisesRegex(
             CorpusValidationError,
-            "real-windowed-capture-rights, ada-release-suite",
+            "release gates remain blocked: ada-release-suite$",
+        ):
+            validate(release=True)
+
+    def test_official_kitti_windowed_fixture_resolves_only_the_media_rights_gate(self):
+        manifest = load_json(ROOT / "release_corpus" / "manifest.json")
+        fixtures = {
+            item["id"]: item for item in manifest["real_captures"]
+        }
+        fixture = fixtures["real-kitti-odometry-00-windowed-3001"]
+        self.assertEqual(fixture["status"], "ready-external")
+        self.assertEqual(fixture["classification"], "windowed")
+        self.assertEqual(fixture["presentation_frames"], 3001)
+        self.assertEqual(
+            fixture["provenance"]["official_dataset"],
+            "KITTI Visual Odometry / SLAM Evaluation 2012",
+        )
+        self.assertEqual(fixture["provenance"]["sequence"], "00")
+        self.assertEqual(fixture["provenance"]["camera"], "image_0")
+        self.assertEqual(
+            fixture["provenance"]["source_frame_range"], [0, 3000]
+        )
+        self.assertEqual(
+            fixture["license"]["spdx"], "CC-BY-NC-SA-3.0"
+        )
+        self.assertFalse(fixture["storage"]["checked_in"])
+        self.assertEqual(
+            fixture["storage"]["location"],
+            "caller-supplied release-suite scratch storage",
+        )
+
+        result = validate()
+        self.assertEqual(
+            [item["id"] for item in result["blockers"]],
+            ["ada-release-suite"],
+        )
+        with self.assertRaisesRegex(
+            CorpusValidationError,
+            "release gates remain blocked: ada-release-suite$",
         ):
             validate(release=True)
 
@@ -117,7 +171,12 @@ class ReleaseCorpusTests(unittest.TestCase):
         with self.assertRaisesRegex(CorpusValidationError, "must be forbidden"):
             _validate_neural_oracles(weakened)
         invented = copy.deepcopy(oracle)
-        invented["fixtures"]["real-windowed-above-3000"]["ranges"] = {}
+        invented["fixtures"]["fixture-pending"] = {
+            "status": "pending-calibration",
+            "expected_frame_count": 3001,
+            "source_sha256": None,
+            "ranges": {},
+        }
         with self.assertRaisesRegex(CorpusValidationError, "must not invent"):
             _validate_neural_oracles(invented)
         uncalibrated = copy.deepcopy(oracle)
@@ -126,6 +185,18 @@ class ReleaseCorpusTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(CorpusValidationError, "calibration evidence"):
             _validate_neural_oracles(uncalibrated)
+        wrong_pipeline = copy.deepcopy(oracle)
+        wrong_pipeline["fixtures"]["fixture-windowed"] = copy.deepcopy(
+            oracle["fixtures"]["real-courthouse-streaming-286"]
+        )
+        wrong_pipeline["fixtures"]["fixture-windowed"][
+            "expected_frame_count"
+        ] = 3001
+        with self.assertRaisesRegex(
+            CorpusValidationError,
+            "windowed calibration evidence",
+        ):
+            _validate_neural_oracles(wrong_pipeline)
 
 
 @unittest.skipIf(np is None, "Neural oracle requires the pinned Worker Runtime")
@@ -292,12 +363,28 @@ class NeuralOutputOracleTests(unittest.TestCase):
 
     def test_production_pending_fixture_refuses_uncalibrated_output(self):
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary)
+            root = Path(temporary)
+            oracle_path = root / "oracle.json"
+            oracle = load_json(
+                ROOT / "release_corpus" / "neural-oracles.json"
+            )
+            oracle["fixtures"]["fixture-pending"] = {
+                "status": "pending-calibration",
+                "expected_frame_count": 3001,
+                "source_sha256": None,
+                "ranges": None,
+            }
+            oracle_path.write_text(
+                json.dumps(oracle, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(
                 CorpusValidationError, "not calibrated"
             ):
                 validate_neural_output(
-                    output, "real-windowed-above-3000"
+                    root,
+                    "fixture-pending",
+                    oracle_path=oracle_path,
                 )
 
 

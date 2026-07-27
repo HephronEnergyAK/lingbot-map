@@ -36,6 +36,7 @@ from lingbot_map_worker.decoder import (  # noqa: E402
 from lingbot_map_worker.gpu_profiles import (  # noqa: E402
     PROFILE_BY_NAME,
     ProfileSelection,
+    inference_plan,
 )
 from lingbot_map_worker.gpu_devices import (  # noqa: E402
     NvmlDeviceProvider,
@@ -44,12 +45,22 @@ from lingbot_map_worker.gpu_devices import (  # noqa: E402
 from lingbot_map_worker.production_model import (  # noqa: E402
     TorchPredictionDecoder,
     load_production_adapter,
+    load_production_window_predictor,
+)
+from lingbot_map_worker.long_pipeline import (  # noqa: E402
+    WindowedReconstructionPipeline,
+)
+from lingbot_map_worker.result_pipeline import (  # noqa: E402
+    AlignedPrediction,
 )
 from lingbot_map_worker.short_pipeline import (  # noqa: E402
     NullExecutionGuard,
     ProgressReporter,
     ShortReconstructionPipeline,
     SourceFrame,
+)
+from lingbot_map_worker.window_alignment import (  # noqa: E402
+    ALIGNMENT_RULE_VERSION,
 )
 from scripts.validate_neural_oracle import _metrics  # noqa: E402
 
@@ -83,6 +94,16 @@ def _require_sha256(value: str, label: str) -> str:
     return value
 
 
+def _canonical_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _prepare_output(path: Path) -> Path:
     path = Path(os.path.abspath(path))
     if path.exists():
@@ -113,6 +134,7 @@ class RawArraySink:
         self.width = width
         self.next_index = 0
         self.decoder = TorchPredictionDecoder()
+        self.boundary_metrics: list[Any] = []
         self.arrays = {
             "world_to_camera": np.lib.format.open_memmap(
                 output / ARRAY_FILENAMES["world_to_camera"],
@@ -156,7 +178,11 @@ class RawArraySink:
         return None
 
     def accept(self, prediction: Any, canonical: Any, pts_seconds: float) -> None:
-        aligned = self.decoder(prediction, canonical, pts_seconds)
+        aligned = (
+            prediction
+            if isinstance(prediction, AlignedPrediction)
+            else self.decoder(prediction, canonical, pts_seconds)
+        )
         if aligned.frame_index != self.next_index:
             raise CalibrationError("model output is not contiguous and presentation-aligned")
         if aligned.depth.shape != (self.height, self.width):
@@ -172,6 +198,9 @@ class RawArraySink:
         self.arrays["frame_type"][index] = aligned.frame_type
         self.next_index += 1
 
+    def record_window_boundary(self, metrics: Any) -> None:
+        self.boundary_metrics.append(metrics)
+
     def finish(self) -> int:
         if self.next_index != self.frame_count:
             raise CalibrationError(
@@ -185,6 +214,19 @@ class RawArraySink:
     def abort(self) -> None:
         self.arrays.clear()
         gc.collect()
+
+
+def _create_pipeline(
+    frame_count: int,
+    short_factory: Any,
+    window_factory: Any,
+) -> ShortReconstructionPipeline | WindowedReconstructionPipeline:
+    plan = inference_plan(frame_count)
+    if plan.mode == "streaming":
+        return ShortReconstructionPipeline(short_factory)
+    if plan.mode == "windowed":
+        return WindowedReconstructionPipeline(window_factory)
+    raise CalibrationError(f"unsupported calibration mode: {plan.mode}")
 
 
 def calibrate(arguments: argparse.Namespace) -> dict[str, Any]:
@@ -270,6 +312,20 @@ def calibrate(arguments: argparse.Namespace) -> dict[str, Any]:
             torch_module=torch,
         )
 
+    def window_predictor_factory(
+        plan: Any,
+        _resolved: Any,
+        _frame_shape: tuple[int, int, int],
+    ) -> Any:
+        return load_production_window_predictor(
+            model_path=model,
+            expected_sha256=expected_model,
+            plan=plan,
+            profile=profile,
+            cancel=lambda: False,
+            torch_module=torch,
+        )
+
     frames = (
         SourceFrame(item.frame_index, item.pts_seconds, item.srgb)
         for item in iter_capture_source_frames(
@@ -278,7 +334,11 @@ def calibrate(arguments: argparse.Namespace) -> dict[str, Any]:
             thread_budget=1,
         )
     )
-    pipeline = ShortReconstructionPipeline(adapter_factory)
+    pipeline = _create_pipeline(
+        frame_count,
+        adapter_factory,
+        window_predictor_factory,
+    )
     try:
         pipeline.run(
             frame_count=frame_count,
@@ -328,6 +388,9 @@ def calibrate(arguments: argparse.Namespace) -> dict[str, Any]:
             ("frame_type.npy", ARRAY_FILENAMES["frame_type"]),
         )
     }
+    boundary_documents = [
+        item.document() for item in sink.boundary_metrics
+    ]
     report = {
         "schema_version": "1.0.0",
         "purpose": "engineering-range-calibration-not-a-cross-gpu-checksum",
@@ -337,8 +400,21 @@ def calibrate(arguments: argparse.Namespace) -> dict[str, Any]:
         "runtime_id": runtime_id,
         "profile": profile.name,
         "frame_count": frame_count,
+        "pipeline_mode": inference_plan(frame_count).mode,
         "model_grid": [height, width],
         "metrics": _metrics(arrays),
+        "window_alignment": {
+            "rule_version": ALIGNMENT_RULE_VERSION,
+            "boundary_count": len(sink.boundary_metrics),
+            "quality_warning_count": sum(
+                item.warning() is not None
+                for item in sink.boundary_metrics
+            ),
+            "boundary_metrics_sha256": _canonical_sha256(
+                boundary_documents
+            ),
+            "boundaries": boundary_documents,
+        },
         "hardware": {
             "gpu_uuid": physical_gpu.uuid,
             "gpu_name": physical_gpu.name,

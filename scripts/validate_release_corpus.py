@@ -20,6 +20,16 @@ if str(WORKER_SOURCE) not in sys.path:
 
 MAX_JSON_BYTES = 2 * 1024 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}")
+KITTI_FIXTURE_ID = "real-kitti-odometry-00-windowed-3001"
+KITTI_DATASET = "KITTI Visual Odometry / SLAM Evaluation 2012"
+KITTI_SOURCE_CONTRACT = (
+    ROOT / "release_corpus" / "kitti-odometry-00-source.json"
+)
+KITTI_ACQUISITION_RECIPE = (
+    "Download the exact official archive and run "
+    "python scripts/acquire_kitti_release_fixture.py "
+    "<archive> <empty-scratch-output>."
+)
 ORDINARY_IDS = {
     "synthetic-boundary-8",
     "synthetic-boundary-320",
@@ -409,10 +419,301 @@ def _validate_neural_oracles(neural: dict[str, Any]) -> None:
                 raise CorpusValidationError(
                     f"ready neural fixture lacks calibration evidence: {fixture_id}"
                 )
+            if fixture.get("expected_frame_count", 0) > 3000:
+                alignment = calibration.get("window_alignment")
+                if (
+                    calibration.get("pipeline_mode") != "windowed"
+                    or not isinstance(alignment, dict)
+                    or set(alignment)
+                    != {
+                        "rule_version",
+                        "boundary_count",
+                        "quality_warning_count",
+                        "boundary_metrics_sha256",
+                    }
+                    or alignment.get("rule_version") != "1.0.0"
+                    or not isinstance(
+                        alignment.get("boundary_count"), int
+                    )
+                    or alignment["boundary_count"] < 1
+                    or not isinstance(
+                        alignment.get("quality_warning_count"), int
+                    )
+                    or not (
+                        0
+                        <= alignment["quality_warning_count"]
+                        <= alignment["boundary_count"]
+                    )
+                ):
+                    raise CorpusValidationError(
+                        "ready long neural fixture lacks exact windowed "
+                        f"calibration evidence: {fixture_id}"
+                    )
+                _require_sha(
+                    alignment.get("boundary_metrics_sha256"),
+                    label=(
+                        f"windowed calibration boundary metrics: {fixture_id}"
+                    ),
+                )
         elif ranges is not None:
             raise CorpusValidationError(
                 f"pending neural fixture must not invent ranges: {fixture_id}"
             )
+
+
+def _validate_kitti_fixture(fixture: dict[str, Any]) -> None:
+    _require_exact_keys(
+        fixture,
+        {
+            "id",
+            "status",
+            "classification",
+            "presentation_frames",
+            "provenance",
+            "acquisition_recipe",
+            "license",
+            "storage",
+            "generated_sha256",
+            "generated_bytes",
+        },
+        label="KITTI release fixture",
+    )
+    contract = load_json(KITTI_SOURCE_CONTRACT)
+    _require_exact_keys(
+        contract,
+        {
+            "schema_version",
+            "fixture_id",
+            "status",
+            "source_archive",
+            "selection",
+            "license",
+            "observed_evidence",
+            "expected_output",
+        },
+        label="KITTI source contract",
+    )
+    if (
+        contract["schema_version"] != "1.0.0"
+        or contract["fixture_id"] != KITTI_FIXTURE_ID
+        or contract["status"] != "ready"
+    ):
+        raise CorpusValidationError("KITTI source contract is not ready")
+    archive = contract["source_archive"]
+    selection = contract["selection"]
+    license_record = contract["license"]
+    evidence = contract["observed_evidence"]
+    output = contract["expected_output"]
+    _require_exact_keys(
+        archive,
+        {"filename", "url", "bytes", "etag", "last_modified", "sha256"},
+        label="KITTI source archive",
+    )
+    _require_exact_keys(
+        selection,
+        {
+            "sequence",
+            "camera",
+            "source_frame_range",
+            "source_files",
+            "source_dimensions",
+            "output_dimensions",
+            "fps",
+            "temporal_sampling",
+        },
+        label="KITTI source selection",
+    )
+    _require_exact_keys(
+        license_record,
+        {
+            "spdx",
+            "evidence_path",
+            "evidence_sha256",
+            "official_evidence_url",
+            "license_deed_url",
+            "attribution",
+            "constraints",
+        },
+        label="KITTI license record",
+    )
+    _require_exact_keys(
+        evidence,
+        {
+            "ordered_member_sha256_manifest",
+            "transformed_rgb_sha256",
+        },
+        label="KITTI source evidence",
+    )
+    _require_exact_keys(
+        output,
+        {
+            "id",
+            "kind",
+            "file",
+            "bytes",
+            "sha256",
+            "frame_count",
+            "mode",
+            "keyframe_interval",
+            "video_codec",
+            "coded_dimensions",
+            "displayed_dimensions",
+            "display_transform",
+            "color_standard",
+            "color_range",
+            "variable_frame_rate",
+            "timestamps_sha256",
+            "decoded_rgb_sha256",
+            "official_dataset",
+            "sequence",
+            "camera",
+            "source_frame_range",
+            "source_archive_sha256",
+            "source_files",
+            "source_manifest_sha256",
+            "transformed_rgb_sha256",
+            "license_spdx",
+        },
+        label="KITTI expected output",
+    )
+    if (
+        not isinstance(archive, dict)
+        or archive.get("filename") != "data_odometry_gray.zip"
+        or archive.get("url")
+        != (
+            "https://s3.eu-central-1.amazonaws.com/avg-kitti/"
+            "data_odometry_gray.zip"
+        )
+        or archive.get("bytes") != 23_166_524_501
+        or archive.get("etag")
+        != '"1129e5e7249778de3bc174315455a681-2762"'
+        or archive.get("last_modified")
+        != "Fri, 11 May 2018 16:05:50 GMT"
+    ):
+        raise CorpusValidationError("KITTI official archive identity drifted")
+    _require_sha(archive.get("sha256"), label="KITTI archive")
+    if selection != {
+        "sequence": "00",
+        "camera": "image_0",
+        "source_frame_range": [0, 3000],
+        "source_files": 3001,
+        "source_dimensions": [1241, 376],
+        "output_dimensions": [518, 158],
+        "fps": 10,
+        "temporal_sampling": False,
+    }:
+        raise CorpusValidationError("KITTI frame selection drifted")
+    if (
+        not isinstance(license_record, dict)
+        or license_record.get("spdx") != "CC-BY-NC-SA-3.0"
+        or license_record.get("official_evidence_url")
+        != "https://www.cvlibs.net/datasets/kitti/"
+        or license_record.get("license_deed_url")
+        != "https://creativecommons.org/licenses/by-nc-sa/3.0/"
+        or set(license_record.get("constraints", []))
+        != {
+            "attribution-required",
+            "non-commercial-only",
+            "share-alike-3.0-required-for-derivatives",
+        }
+    ):
+        raise CorpusValidationError("KITTI license evidence drifted")
+    evidence_path = ROOT / str(license_record.get("evidence_path"))
+    evidence_sha = _require_sha(
+        license_record.get("evidence_sha256"),
+        label="KITTI license evidence",
+    )
+    if (
+        not _ordinary_file(evidence_path)
+        or _sha256(evidence_path) != evidence_sha
+    ):
+        raise CorpusValidationError("KITTI captured license record drifted")
+    for label, value in {
+        "KITTI ordered member manifest": evidence.get(
+            "ordered_member_sha256_manifest"
+        ),
+        "KITTI transformed pixels": evidence.get(
+            "transformed_rgb_sha256"
+        ),
+        "KITTI generated fixture": output.get("sha256"),
+        "KITTI decoded fixture pixels": output.get(
+            "decoded_rgb_sha256"
+        ),
+        "KITTI fixture timestamps": output.get("timestamps_sha256"),
+    }.items():
+        _require_sha(value, label=label)
+    if (
+        output.get("id") != KITTI_FIXTURE_ID
+        or output.get("kind")
+        != "real-windowed-official-benchmark"
+        or output.get("frame_count") != 3001
+        or output.get("mode") != "windowed"
+        or output.get("official_dataset") != KITTI_DATASET
+        or output.get("sequence") != "00"
+        or output.get("camera") != "image_0"
+        or output.get("source_frame_range") != [0, 3000]
+        or output.get("source_archive_sha256") != archive["sha256"]
+        or output.get("source_files") != 3001
+        or output.get("source_manifest_sha256")
+        != evidence["ordered_member_sha256_manifest"]
+        or output.get("transformed_rgb_sha256")
+        != evidence["transformed_rgb_sha256"]
+        or output.get("license_spdx") != "CC-BY-NC-SA-3.0"
+    ):
+        raise CorpusValidationError("KITTI expected output evidence drifted")
+
+    contract_sha = _sha256(KITTI_SOURCE_CONTRACT)
+    provenance = fixture.get("provenance")
+    storage = fixture.get("storage")
+    if not isinstance(provenance, dict) or not isinstance(storage, dict):
+        raise CorpusValidationError(
+            "KITTI provenance or storage record is malformed"
+        )
+    _require_exact_keys(
+        provenance,
+        {
+            "official_dataset",
+            "source_contract_path",
+            "source_contract_sha256",
+            "sequence",
+            "camera",
+            "source_frame_range",
+            "source_archive_sha256",
+            "ordered_member_sha256_manifest",
+            "temporal_sampling",
+        },
+        label="KITTI release provenance",
+    )
+    if (
+        fixture.get("status") != "ready-external"
+        or fixture.get("classification") != "windowed"
+        or fixture.get("presentation_frames") != 3001
+        or fixture.get("acquisition_recipe")
+        != KITTI_ACQUISITION_RECIPE
+        or fixture.get("generated_sha256") != output["sha256"]
+        or fixture.get("generated_bytes") != output["bytes"]
+        or provenance.get("official_dataset") != KITTI_DATASET
+        or provenance.get("source_contract_path")
+        != "release_corpus/kitti-odometry-00-source.json"
+        or provenance.get("source_contract_sha256") != contract_sha
+        or provenance.get("sequence") != "00"
+        or provenance.get("camera") != "image_0"
+        or provenance.get("source_frame_range") != [0, 3000]
+        or provenance.get("source_archive_sha256") != archive["sha256"]
+        or provenance.get("ordered_member_sha256_manifest")
+        != evidence["ordered_member_sha256_manifest"]
+        or provenance.get("temporal_sampling") is not False
+        or fixture.get("license") != license_record
+        or storage
+        != {
+            "checked_in": False,
+            "location": (
+                "caller-supplied release-suite scratch storage"
+            ),
+            "included_in_extension_or_worker": False,
+        }
+    ):
+        raise CorpusValidationError("KITTI release fixture metadata drifted")
 
 
 def _validate_generated(
@@ -477,9 +778,123 @@ def _validate_generated(
     return actual_ids
 
 
+def _validate_benchmark_fixture_manifest(
+    acquisition_path: Path,
+) -> str:
+    acquisition = load_json(acquisition_path)
+    _require_exact_keys(
+        acquisition,
+        {
+            "schema_version",
+            "status",
+            "fixture_id",
+            "source_contract",
+            "dataset",
+            "selection",
+            "license",
+            "source_evidence",
+            "output",
+            "personal_capture_sources",
+            "checked_in_media",
+        },
+        label="benchmark fixture acquisition manifest",
+    )
+    contract = load_json(KITTI_SOURCE_CONTRACT)
+    output = acquisition["output"]
+    source_contract = acquisition["source_contract"]
+    if (
+        acquisition["schema_version"] != "1.0.0"
+        or acquisition["status"] != "release-evidence"
+        or acquisition["fixture_id"] != KITTI_FIXTURE_ID
+        or acquisition["personal_capture_sources"] is not False
+        or acquisition["checked_in_media"] is not False
+        or source_contract
+        != {
+            "path": "release_corpus/kitti-odometry-00-source.json",
+            "sha256": _sha256(KITTI_SOURCE_CONTRACT),
+        }
+        or acquisition["dataset"]
+        != {
+            "name": KITTI_DATASET,
+            "official_page": (
+                "https://www.cvlibs.net/datasets/kitti/"
+                "eval_odometry.php"
+            ),
+            "archive_url": contract["source_archive"]["url"],
+        }
+        or acquisition["selection"] != contract["selection"]
+        or acquisition["license"] != contract["license"]
+        or acquisition["source_evidence"]
+        != {
+            "archive_filename": contract["source_archive"]["filename"],
+            "archive_bytes": contract["source_archive"]["bytes"],
+            "archive_sha256": contract["source_archive"]["sha256"],
+            "ordered_member_sha256_manifest": contract[
+                "observed_evidence"
+            ]["ordered_member_sha256_manifest"],
+            "transformed_rgb_sha256": contract["observed_evidence"][
+                "transformed_rgb_sha256"
+            ],
+        }
+        or output != contract["expected_output"]
+    ):
+        raise CorpusValidationError(
+            "benchmark fixture acquisition evidence drifted"
+        )
+    if output.get("file") != f"{KITTI_FIXTURE_ID}.mp4":
+        raise CorpusValidationError(
+            "benchmark fixture media name is not canonical"
+        )
+    media = acquisition_path.parent / output["file"]
+    if (
+        not _ordinary_file(media)
+        or media.stat().st_size != output["bytes"]
+        or _sha256(media) != output["sha256"]
+    ):
+        raise CorpusValidationError(
+            "benchmark fixture media is absent or changed"
+        )
+    try:
+        import numpy as np
+        from lingbot_map_worker.decoder import preflight_capture_source
+        from lingbot_map_worker.gpu_profiles import inference_plan
+    except ModuleNotFoundError as exc:
+        raise CorpusValidationError(
+            "benchmark fixture validation requires the pinned Worker Runtime"
+        ) from exc
+    report = preflight_capture_source(media)
+    plan = inference_plan(len(report.timestamps_seconds))
+    if (
+        len(report.timestamps_seconds) != output["frame_count"]
+        or report.rgb_sha256 != output["decoded_rgb_sha256"]
+        or report.video_codec != output["video_codec"]
+        or [report.coded_width, report.coded_height]
+        != output["coded_dimensions"]
+        or [report.displayed_width, report.displayed_height]
+        != output["displayed_dimensions"]
+        or report.display_transform.name != output["display_transform"]
+        or report.color.standard != output["color_standard"]
+        or report.color.range != output["color_range"]
+        or report.variable_frame_rate != output["variable_frame_rate"]
+        or plan.mode != output["mode"]
+        or plan.keyframe_interval != output["keyframe_interval"]
+        or _sha256_bytes(
+            np.asarray(
+                report.timestamps_seconds, dtype="<f8"
+            ).tobytes(order="C")
+        )
+        != output["timestamps_sha256"]
+    ):
+        raise CorpusValidationError(
+            "benchmark fixture decoded identity drifted"
+        )
+    return KITTI_FIXTURE_ID
+
+
 def validate(
     *,
     generated_manifest: Path | None = None,
+    benchmark_fixture_manifest: Path | None = None,
     require_stress: bool = False,
     release: bool = False,
 ) -> dict[str, Any]:
@@ -548,6 +963,11 @@ def validate(
         raise CorpusValidationError(
             "real courthouse provenance or license evidence drifted"
         )
+    if KITTI_FIXTURE_ID not in real:
+        raise CorpusValidationError(
+            "official KITTI windowed release fixture is missing"
+        )
+    _validate_kitti_fixture(real[KITTI_FIXTURE_ID])
     stress = manifest["stress_capture"]
     if (
         stress["presentation_frames"] != 25000
@@ -588,20 +1008,36 @@ def validate(
         raise CorpusValidationError(
             "--require-stress requires --generated-manifest"
         )
+    verified_external_fixtures: list[str] = []
+    if benchmark_fixture_manifest is not None:
+        verified_external_fixtures.append(
+            _validate_benchmark_fixture_manifest(
+                benchmark_fixture_manifest.resolve()
+            )
+        )
 
+    gates = manifest["release_gates"]
+    if [gate.get("id") for gate in gates] != [
+        "real-windowed-capture-rights",
+        "ada-release-suite",
+    ] or gates[0].get("status") != "ready":
+        raise CorpusValidationError(
+            "release gate inventory or KITTI rights resolution drifted"
+        )
     blockers = [
         {
             "id": gate["id"],
             "status": gate["status"],
             "resolution": gate["resolution"],
         }
-        for gate in manifest["release_gates"]
+        for gate in gates
         if gate["status"] != "ready"
     ]
     result = {
         "schema_version": "1.0.0",
         "structural_validation": "passed",
         "generated_fixtures": sorted(fixture_ids),
+        "verified_external_fixtures": verified_external_fixtures,
         "release_ready": not blockers,
         "blockers": blockers,
     }
@@ -616,12 +1052,16 @@ def validate(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--generated-manifest", type=Path)
+    parser.add_argument("--benchmark-fixture-manifest", type=Path)
     parser.add_argument("--require-stress", action="store_true")
     parser.add_argument("--release", action="store_true")
     arguments = parser.parse_args(argv)
     try:
         result = validate(
             generated_manifest=arguments.generated_manifest,
+            benchmark_fixture_manifest=(
+                arguments.benchmark_fixture_manifest
+            ),
             require_stress=arguments.require_stress,
             release=arguments.release,
         )

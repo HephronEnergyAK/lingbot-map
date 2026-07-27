@@ -20,6 +20,9 @@ QUALITY_SCALE_MAX = 1.25
 QUALITY_ROTATION_P95_DEGREES = 5.0
 QUALITY_CENTER_P95 = 0.05
 QUALITY_LOG_DEPTH_P95 = math.log(1.25)
+# The pose decoder originates in float32; the release neural contract fixes
+# its rigid-matrix tolerance at 1e-6 before any window transform is estimated.
+OVERLAP_ROTATION_ATOL = 1e-6
 
 
 class WindowAlignmentError(RuntimeError):
@@ -121,9 +124,18 @@ def _camera_to_world(frame: AlignedPrediction) -> np.ndarray:
     ):
         raise WindowAlignmentError("overlap camera is non-finite or malformed")
     rotation = matrix[:3, :3]
-    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-7, rtol=0):
+    if not np.allclose(
+        rotation.T @ rotation,
+        np.eye(3),
+        atol=OVERLAP_ROTATION_ATOL,
+        rtol=0,
+    ):
         raise WindowAlignmentError("overlap camera rotation is not orthonormal")
-    if not math.isclose(float(np.linalg.det(rotation)), 1.0, abs_tol=1e-7):
+    if not math.isclose(
+        float(np.linalg.det(rotation)),
+        1.0,
+        abs_tol=OVERLAP_ROTATION_ATOL,
+    ):
         raise WindowAlignmentError("overlap camera rotation is singular or reflected")
     try:
         return np.linalg.inv(matrix)
