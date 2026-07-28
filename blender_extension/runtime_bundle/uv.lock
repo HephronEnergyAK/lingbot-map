@@ -315,7 +315,7 @@ dependencies = [
     { name = "tqdm" },
 ]
 wheels = [
-    { filename = "lingbot_map-0.1.0-py3-none-any.whl", hash = "sha256:b02c9a46057df3d729ab2a75bb7c1efdab112aef12d05cb900dc97788c9e3101" },
+    { filename = "lingbot_map-0.1.0-py3-none-any.whl", hash = "sha256:3fa995d10189fe4100b699e10b1620f5095864202d3a232cd8276bf0b1a7e929" },
 ]
 
 [package.metadata]
@@ -371,7 +371,7 @@ dependencies = [
     { name = "torch" },
 ]
 wheels = [
-    { filename = "lingbot_map_worker-0.1.0-py3-none-any.whl", hash = "sha256:b1666bb2ca03de2e6abf65d730ff5077ea54e0ade4b4a7db0eb9d70ca22286e6" },
+    { filename = "lingbot_map_worker-0.1.0-py3-none-any.whl", hash = "sha256:117456ae8bb4ba05f53668a774033dedfb048b00c3c3ef5902ce7264a2f1d00e" },
 ]
 
 [package.metadata]

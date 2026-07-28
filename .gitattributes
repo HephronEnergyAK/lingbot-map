@@ -6,6 +6,8 @@ model-licenses/*.txt text eol=lf
 blender_extension/runtime_bundle/*.json text eol=lf
 blender_extension/runtime_bundle/schemas/*.json text eol=lf
 blender_extension/runtime_bundle/model-licenses/*.txt text eol=lf
+blender_extension/runtime_bundle/wheels/*.whl binary
+release/*.json text eol=lf
 release_corpus/*.json text eol=lf
 release_corpus/licenses/*.md text eol=lf
 

@@ -1,0 +1,127 @@
+name: Clean-tag Release Package
+
+on:
+  push:
+    tags:
+      - "v0.[0-9]*.[0-9]*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  untrusted-input:
+    uses: ./.github/workflows/untrusted-input.yml
+    permissions:
+      contents: read
+
+  package:
+    if: github.repository == 'HephronEnergyAK/lingbot-map'
+    needs:
+      - untrusted-input
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out the immutable tag
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up the release validator
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Run package-boundary regression tests
+        run: >-
+          python -m unittest
+          tests.test_release_package
+          tests.test_localization
+          tests.test_blender_extension
+          tests.test_runtime_setup
+          tests.test_model_store
+          -v
+
+      - name: Build only from the tagged Git commit
+        run: >-
+          python scripts/release_package.py build
+          --output-dir dist/release
+
+      - name: Resolve versioned release asset paths
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $base = "dist/release/lingbot_map_reconstruction-$version"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "RELEASE_VERSION=$version"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "RELEASE_ARCHIVE=$base.zip"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "RELEASE_SHA=$base.zip.sha256"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "RELEASE_SBOM=$base.sbom.spdx.json"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "RELEASE_PROVENANCE=$base.provenance.json"
+
+      - name: Revalidate the final ZIP and release companions
+        run: >-
+          python scripts/release_package.py validate
+          --archive "${{ env.RELEASE_ARCHIVE }}"
+
+      - name: Attest the Release Package provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.RELEASE_ARCHIVE }}
+
+      - name: Attest the SPDX SBOM
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.RELEASE_ARCHIVE }}
+          sbom-path: ${{ env.RELEASE_SBOM }}
+
+      - name: Retain the complete inspected package boundary
+        uses: actions/upload-artifact@v4
+        with:
+          name: lingbot-map-reconstruction-${{ env.RELEASE_VERSION }}
+          path: dist/release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Recheck the remote tag at the publication seam
+        shell: pwsh
+        run: |
+          $tagRef = "refs/tags/$env:GITHUB_REF_NAME"
+          $remote = @(git ls-remote --exit-code origin $tagRef "$tagRef^{}")
+          if ($LASTEXITCODE -ne 0 -or $remote.Count -eq 0) {
+            throw "Remote release tag is missing"
+          }
+          $peeled = @($remote | Where-Object { $_ -match '\^\{\}$' })
+          $resolved = if ($peeled.Count -eq 1) {
+            ($peeled[0] -split '\s+')[0]
+          } elseif ($remote.Count -eq 1) {
+            ($remote[0] -split '\s+')[0]
+          } else {
+            throw "Remote release tag did not resolve unambiguously"
+          }
+          if ($resolved -ne $env:GITHUB_SHA) {
+            throw "Remote release tag moved after the workflow started"
+          }
+
+      - name: Publish the engineering GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            "$env:RELEASE_ARCHIVE#LingBot Map Reconstruction $env:RELEASE_VERSION" `
+            "$env:RELEASE_SHA#SHA-256" `
+            "$env:RELEASE_SBOM#SPDX 2.3 SBOM" `
+            "$env:RELEASE_PROVENANCE#Build provenance" `
+            --repo $env:GITHUB_REPOSITORY `
+            --verify-tag `
+            --title "LingBot Map Reconstruction $env:RELEASE_VERSION" `
+            --notes "Engineering release qualification scope: Windows 11 x64, Blender 5.2 LTS, and the RTX 5090 Blackwell 32 GB reference only. This release does not claim Ada qualification, general NVIDIA qualification, 1.0.0 readiness, or official Blender Extensions platform readiness." `
+            --generate-notes `
+            --prerelease

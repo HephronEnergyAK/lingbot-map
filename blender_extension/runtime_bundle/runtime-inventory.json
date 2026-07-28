@@ -15,6 +15,7 @@
     {"name": "flatbuffers", "version": "25.12.19"},
     {"name": "fsspec", "version": "2026.6.0"},
     {"name": "h11", "version": "0.16.0"},
+    {"name": "hf-xet", "version": "1.5.2"},
     {"name": "httpcore", "version": "1.0.9"},
     {"name": "httpx", "version": "0.28.1"},
     {"name": "huggingface-hub", "version": "1.24.0"},
