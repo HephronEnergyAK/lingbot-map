@@ -217,8 +217,8 @@
     },
     {
       "id": "ada-release-suite",
-      "status": "blocked-external",
-      "resolution": "Run the complete native release suite, including the calibrated neural ranges, on an Ada consumer GPU with at least 16 GB and verify behavior when higher Profiles do not qualify."
+      "status": "deferred-1.0",
+      "resolution": "Required before 1.0.0 or official-platform submission: run the complete native release suite, including the calibrated neural ranges, on an Ada consumer GPU with at least 16 GB and verify behavior when higher Profiles do not qualify. Blackwell-qualified 0.x engineering releases must disclose that Ada remains unqualified."
     }
   ]
 }

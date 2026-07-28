@@ -64,19 +64,23 @@ class ReleaseCorpusTests(unittest.TestCase):
             WindowedReconstructionPipeline,
         )
 
-    def test_structural_oracles_pass_and_release_gate_names_are_exact(self):
+    def test_engineering_release_defers_ada_until_stable_qualification(self):
         result = validate()
         self.assertEqual(result["structural_validation"], "passed")
-        self.assertFalse(result["release_ready"])
+        self.assertTrue(result["release_ready"])
+        self.assertTrue(result["engineering_release_ready"])
+        self.assertFalse(result["stable_release_ready"])
+        self.assertEqual(result["blockers"], [])
         self.assertEqual(
-            [item["id"] for item in result["blockers"]],
+            [item["id"] for item in result["deferred_gates"]],
             ["ada-release-suite"],
         )
+        self.assertTrue(validate(release=True)["release_ready"])
         with self.assertRaisesRegex(
             CorpusValidationError,
-            "release gates remain blocked: ada-release-suite$",
+            "stable release gates remain blocked: ada-release-suite$",
         ):
-            validate(release=True)
+            validate(stable_release=True)
 
     def test_official_kitti_windowed_fixture_resolves_only_the_media_rights_gate(self):
         manifest = load_json(ROOT / "release_corpus" / "manifest.json")
@@ -106,15 +110,12 @@ class ReleaseCorpusTests(unittest.TestCase):
         )
 
         result = validate()
+        self.assertEqual(result["blockers"], [])
         self.assertEqual(
-            [item["id"] for item in result["blockers"]],
+            [item["id"] for item in result["deferred_gates"]],
             ["ada-release-suite"],
         )
-        with self.assertRaisesRegex(
-            CorpusValidationError,
-            "release gates remain blocked: ada-release-suite$",
-        ):
-            validate(release=True)
+        self.assertTrue(validate(release=True)["release_ready"])
 
     def test_small_media_generation_is_byte_deterministic_and_golden(self):
         goldens = load_json(ROOT / "release_corpus" / "generated-goldens.json")

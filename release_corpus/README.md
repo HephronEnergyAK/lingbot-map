@@ -106,7 +106,7 @@ fresh-install splash without changing the user's preferences:
   -WorkerPython C:\path\to\pinned-worker-python.exe
 ```
 
-## Current external release gates
+## Current release gates
 
 The corpus has two licensed real sources: the repository Apache-2.0
 286-frame courthouse sequence for Streaming and the externally stored
@@ -115,8 +115,13 @@ CC-BY-NC-SA-3.0 KITTI 3,001-frame sequence for Windowed. The upstream demo
 exposes no explicit license; it must not be downloaded into CI, redistributed,
 or treated as release evidence.
 
-The remaining external release gate is the complete native suite on an Ada
-consumer GPU with at least 16 GB, including the calibrated neural ranges and
-the behavior when higher Profiles do not qualify. Structural validation
-succeeds, but `--release` continues to fail on that exact gate until real Ada
-evidence exists.
+The qualified RTX 5090 Blackwell suite is sufficient for a disclosed `0.x`
+engineering Release Package, so `validate_release_corpus.py --release` does
+not require Ada evidence. Such a release is Blackwell-qualified only and
+cannot claim general NVIDIA, Ada, `1.0.0`, or official-platform readiness.
+
+The complete native suite on an Ada consumer GPU with at least 16 GB remains a
+`1.0.0` and official-platform gate, including the calibrated neural ranges and
+the behavior when higher Profiles do not qualify.
+`validate_release_corpus.py --stable-release` continues to fail on that exact
+gate until real Ada evidence exists.

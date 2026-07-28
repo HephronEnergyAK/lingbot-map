@@ -897,6 +897,7 @@ def validate(
     benchmark_fixture_manifest: Path | None = None,
     require_stress: bool = False,
     release: bool = False,
+    stable_release: bool = False,
 ) -> dict[str, Any]:
     manifest = load_json(ROOT / "release_corpus" / "manifest.json")
     exact = load_json(ROOT / manifest["oracles"]["exact"])
@@ -1020,7 +1021,9 @@ def validate(
     if [gate.get("id") for gate in gates] != [
         "real-windowed-capture-rights",
         "ada-release-suite",
-    ] or gates[0].get("status") != "ready":
+    ] or [
+        gate.get("status") for gate in gates
+    ] != ["ready", "deferred-1.0"]:
         raise CorpusValidationError(
             "release gate inventory or KITTI rights resolution drifted"
         )
@@ -1031,20 +1034,39 @@ def validate(
             "resolution": gate["resolution"],
         }
         for gate in gates
-        if gate["status"] != "ready"
+        if gate["status"] not in {"ready", "deferred-1.0"}
+    ]
+    deferred_gates = [
+        {
+            "id": gate["id"],
+            "status": gate["status"],
+            "resolution": gate["resolution"],
+        }
+        for gate in gates
+        if gate["status"] == "deferred-1.0"
     ]
     result = {
         "schema_version": "1.0.0",
         "structural_validation": "passed",
         "generated_fixtures": sorted(fixture_ids),
         "verified_external_fixtures": verified_external_fixtures,
+        "release_scope": "engineering-0.x",
         "release_ready": not blockers,
+        "engineering_release_ready": not blockers,
+        "stable_release_ready": not blockers and not deferred_gates,
         "blockers": blockers,
+        "deferred_gates": deferred_gates,
     }
     if release and blockers:
         raise CorpusValidationError(
             "release gates remain blocked: "
             + ", ".join(item["id"] for item in blockers)
+        )
+    stable_blockers = blockers + deferred_gates
+    if stable_release and stable_blockers:
+        raise CorpusValidationError(
+            "stable release gates remain blocked: "
+            + ", ".join(item["id"] for item in stable_blockers)
         )
     return result
 
@@ -1054,7 +1076,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generated-manifest", type=Path)
     parser.add_argument("--benchmark-fixture-manifest", type=Path)
     parser.add_argument("--require-stress", action="store_true")
-    parser.add_argument("--release", action="store_true")
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        help="require every gate for a publishable 0.x engineering release",
+    )
+    parser.add_argument(
+        "--stable-release",
+        action="store_true",
+        help="require every gate for 1.0.0 and official-platform readiness",
+    )
     arguments = parser.parse_args(argv)
     try:
         result = validate(
@@ -1064,6 +1095,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             require_stress=arguments.require_stress,
             release=arguments.release,
+            stable_release=arguments.stable_release,
         )
     except CorpusValidationError as exc:
         print(f"LINGBOT_MAP_RELEASE_CORPUS_ERROR={exc}", file=sys.stderr)
