@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import subprocess
@@ -251,7 +252,10 @@ class RuntimeInstallerTests(unittest.TestCase):
                 installed = runtime_setup.RuntimeInstaller(
                     managed, bundle, downloader=fixture.downloader, runner=runner
                 ).setup(offline=False, online_access=True)
-            self.assertEqual(installed.parent, managed / "runtimes")
+            self.assertTrue(
+                os.path.samefile(installed.parent, managed / "runtimes"),
+                "installed Runtime must retain the managed runtimes directory identity",
+            )
             self.assertEqual(installed.name, bundle.identity.runtime_id)
             self.assertEqual(
                 runtime_setup.RuntimeInstaller(
