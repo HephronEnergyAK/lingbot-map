@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0.0",
+  "locales": ["en_US", "zh_HANT"],
+  "chapters": [
+    {
+      "id": "overview",
+      "file": "index.html",
+      "sections": ["overview", "workflow", "release-limitations"]
+    },
+    {
+      "id": "installation-setup",
+      "file": "installation-setup.html",
+      "sections": ["installation", "setup", "offline-setup", "supported-host"]
+    },
+    {
+      "id": "capture",
+      "file": "capture.html",
+      "sections": ["capture-guidance", "continuous-take", "lens-classes", "media-contract"]
+    },
+    {
+      "id": "profiles",
+      "file": "profiles.html",
+      "sections": ["profiles", "advanced-settings", "gpu-qualification", "sky-masking"]
+    },
+    {
+      "id": "reconstruction",
+      "file": "reconstruction.html",
+      "sections": ["reconstruction", "preflight", "cancellation", "long-sources", "loop-closure"]
+    },
+    {
+      "id": "import-visualization",
+      "file": "import-visualization.html",
+      "sections": ["import", "visualization", "camera", "render-engines"]
+    },
+    {
+      "id": "result-lifecycle",
+      "file": "result-lifecycle.html",
+      "sections": ["results", "dense-predictions", "project-trash", "external-results"]
+    },
+    {
+      "id": "privacy-diagnostics",
+      "file": "privacy-diagnostics.html",
+      "sections": ["diagnostics", "diagnostic-export", "privacy", "clipboard"]
+    },
+    {
+      "id": "model-licensing",
+      "file": "model-licensing.html",
+      "sections": ["model-licenses", "model-acquisition", "weight-license-gate"]
+    },
+    {
+      "id": "errors-troubleshooting",
+      "file": "errors-troubleshooting.html",
+      "sections": ["stable-error-codes", "setup-errors", "job-errors", "import-errors", "troubleshooting"]
+    }
+  ]
+}

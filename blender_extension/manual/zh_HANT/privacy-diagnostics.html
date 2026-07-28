@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-Hant" data-locale="zh_HANT">
+<head><meta charset="utf-8"><title>隱私與診斷 — LingBot Map Reconstruction</title><link rel="stylesheet" href="../style.css"></head>
+<body data-chapter-id="privacy-diagnostics">
+<nav><a href="index.html">概覽</a><a href="installation-setup.html">安裝與設定</a><a href="capture.html">擷取</a><a href="profiles.html">設定檔</a><a href="reconstruction.html">重建</a><a href="import-visualization.html">匯入與顯示</a><a href="result-lifecycle.html">Results 與垃圾桶</a><a href="privacy-diagnostics.html">隱私與診斷</a><a href="model-licensing.html">模型授權</a><a href="errors-troubleshooting.html">錯誤</a></nav>
+<main>
+<section id="diagnostics" data-section-id="diagnostics"><h1>診斷</h1><p>失敗、取消、中斷及強制終止路徑會保留有界診斷，其中包含穩定 error codes 與已驗證的工作或操作識別。Worker 人類可讀輸出會在四個 16&nbsp;MiB 檔案間輪替。超過 64&nbsp;MiB 時會記錄結構化 truncation，而終止錯誤、warnings 及有界 tracebacks 會獨立保留。</p><p>診斷會保留至明確生命週期操作，絕不自動上傳。</p></section>
+<section id="diagnostic-export" data-section-id="diagnostic-export"><h2>可攜式診斷報告</h2><p>匯出使用有版本的固定允許清單、嚴格有界解析及 no-follow 檔案身分檢查。絕不包含擷取來源媒體、模型權重、point arrays、Dense Predictions、masks、partial downloads、staging、caches 或未列入清單的內容。預設匯出會遮蔽使用者名稱、機器名稱、絕對路徑、環境值、來源識別及完整 GPU UUID。</p><p>未遮蔽報告是單次匯出的 opt-in，且絕不擴大允許清單。既有目的地不會被覆寫，即使它是在發布競態中出現。</p></section>
+<section id="privacy" data-section-id="privacy"><h2>隱私邊界</h2><p>擴充功能沒有 telemetry、背景更新檢查或隱含上傳。擷取來源保持本機，且不複製到 Results。設定網路活動只會在明確線上操作後發生，並遵守 Blender Online Access。離線設定絕不連線。</p></section>
+<section id="clipboard" data-section-id="clipboard"><h2>剪貼簿</h2><p>「複製診斷報告」是唯一剪貼簿行為。它會複製有界且已遮蔽敏感資料的摘要、manifest 與主要結構化紀錄。它絕不複製未遮蔽表示、媒體、模型位元組或任意診斷檔案。</p></section>
+</main></body></html>

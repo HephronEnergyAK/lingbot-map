@@ -1,0 +1,25 @@
+name: Localization and offline manual
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - codex/reconstruction-0.1.0
+
+permissions:
+  contents: read
+
+jobs:
+  localization:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate catalogs and packaged manuals
+        run: python scripts/validate_localization.py
+      - name: Run localization and Extension shell tests
+        run: python -m unittest tests.test_localization tests.test_blender_extension -v

@@ -1,0 +1,6 @@
+LingBot Map Worker
+Copyright 2026 LingBot Map Contributors
+
+This product includes the separately distributed LingBot-Map model core.
+Third-party dependency notices are generated from the frozen Runtime lock
+before a release package is published.

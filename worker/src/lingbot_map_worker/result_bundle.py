@@ -1,0 +1,1262 @@
+"""Safe NPY contracts and atomic Reconstruction Result publication."""
+
+from __future__ import annotations
+
+import ast
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
+import math
+import os
+from pathlib import Path, PurePosixPath, PureWindowsPath
+import re
+import stat
+import struct
+from typing import Any, Callable, Mapping
+import uuid
+
+import numpy as np
+
+from .dense_predictions import (
+    DenseComponentArtifact,
+    validate_dense_component,
+    validate_dense_descriptor,
+)
+from .ipc import SCHEMA_VERSION, atomic_write_json, read_json, require_exact_object, require_text
+from .model_store_compat import is_reparse_point
+
+
+RESULT_SCHEMA_VERSION = "1.0.0"
+MAX_NPY_HEADER_BYTES = 64 * 1024
+RESULT_ID = re.compile(r"result-[0-9a-f]{32}\Z")
+JOB_ID = re.compile(r"job-[0-9a-f]{32}\Z")
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+DISPLAY_TRANSFORMS = frozenset(
+    {
+        "identity",
+        "rotate_90_ccw",
+        "rotate_180",
+        "rotate_270_ccw",
+        "reflect_x",
+        "reflect_y",
+        "reflect_main_diagonal",
+        "reflect_anti_diagonal",
+    }
+)
+CancelCheck = Callable[[], bool]
+DiskCheck = Callable[[int], None]
+
+
+class ResultBundleError(RuntimeError):
+    pass
+
+
+class ResultCancelled(ResultBundleError):
+    pass
+
+
+@dataclass(frozen=True)
+class ArrayContract:
+    dtype: str
+    shape: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PublishedResult:
+    result_id: str
+    directory: Path
+    manifest: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ResultPublication:
+    job_id: str
+    project_root: Path
+    target_scene: Mapping[str, Any]
+    timeline_start: int
+    source: Mapping[str, Any]
+    profile: Mapping[str, Any]
+    provenance: Mapping[str, Any]
+    warnings: tuple[Mapping[str, str], ...]
+    arrays: Mapping[str, np.ndarray]
+    voxel_edge_length: float
+    voxel_origin: tuple[float, float, float]
+    source_display: Mapping[str, Any] | None = None
+    model_coverage: Mapping[str, Any] | None = None
+    created_utc: str | None = None
+    result_id: str | None = None
+    dense_component: DenseComponentArtifact | None = None
+    window_alignment: Mapping[str, Any] | None = None
+
+
+CORE_ARRAY_DTYPES = {
+    "positions": "<f4",
+    "colors": "|u1",
+    "confidence": "<f4",
+    "radius": "<f4",
+    "source_frame": "<u4",
+    "camera_to_world": "<f4",
+    "model_intrinsics": "<f4",
+    "source_intrinsics": "<f4",
+    "model_fov_radians": "<f4",
+    "source_pts_seconds": "<f8",
+    "source_to_model": "<f8",
+    "frame_type": "|u1",
+}
+OPTIONAL_ARRAY_DTYPES = {
+    "sky_fraction": "<f4",
+}
+RESULT_ARRAY_DTYPES = {**CORE_ARRAY_DTYPES, **OPTIONAL_ARRAY_DTYPES}
+FileIdentity = tuple[int, int, int, int]
+
+
+def _file_identity(value: Any) -> FileIdentity:
+    return (
+        int(getattr(value, "st_dev", 0)),
+        int(getattr(value, "st_ino", 0)),
+        int(getattr(value, "st_size", 0)),
+        int(getattr(value, "st_mtime_ns", 0)),
+    )
+
+
+def _ordinary_file_stat(path: Path) -> os.stat_result:
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise ResultBundleError(
+            f"Result path cannot be inspected safely: {path.name}"
+        ) from exc
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or stat.S_ISLNK(value.st_mode)
+        or bool(
+            getattr(value, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+    ):
+        raise ResultBundleError(f"Result path is not an ordinary file: {path.name}")
+    return value
+
+
+def is_plain_path(path: Path) -> bool:
+    return path.exists() and not path.is_symlink() and not is_reparse_point(path)
+
+
+def safe_relative_file(root: Path, value: str) -> Path:
+    if not isinstance(value, str) or not value or value in {".", ".."} or "\\" in value or "\x00" in value:
+        raise ResultBundleError("Result path must be a non-empty forward-slash relative path")
+    posix = PurePosixPath(value)
+    windows = PureWindowsPath(value)
+    if (
+        posix.is_absolute()
+        or windows.is_absolute()
+        or bool(windows.drive)
+        or value.startswith("//")
+        or any(part in {"", ".", ".."} for part in posix.parts)
+    ):
+        raise ResultBundleError("Result path is absolute, drive-qualified, UNC, or traversing")
+    root = Path(os.path.abspath(root))
+    candidate = root.joinpath(*posix.parts)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:  # Defensive on platforms with unusual path rules.
+        raise ResultBundleError("Result path escaped its bundle root") from exc
+    current = candidate
+    while current != root:
+        if current.exists() and (current.is_symlink() or is_reparse_point(current)):
+            raise ResultBundleError("Result path resolves through linked or reparse content")
+        current = current.parent
+    return candidate
+
+
+def _npy_header(path: Path) -> tuple[str, bool, tuple[int, ...], int]:
+    _ordinary_file_stat(path)
+    with path.open("rb") as stream:
+        if stream.read(6) != b"\x93NUMPY":
+            raise ResultBundleError(f"NPY magic is invalid: {path.name}")
+        version = stream.read(2)
+        if version == b"\x01\x00":
+            length_bytes = stream.read(2)
+            if len(length_bytes) != 2:
+                raise ResultBundleError("NPY header length is truncated")
+            header_length = struct.unpack("<H", length_bytes)[0]
+        elif version in {b"\x02\x00", b"\x03\x00"}:
+            length_bytes = stream.read(4)
+            if len(length_bytes) != 4:
+                raise ResultBundleError("NPY header length is truncated")
+            header_length = struct.unpack("<I", length_bytes)[0]
+        else:
+            raise ResultBundleError("NPY version is unsupported")
+        if not 1 <= header_length <= MAX_NPY_HEADER_BYTES:
+            raise ResultBundleError("NPY header exceeds 64 KiB")
+        header = stream.read(header_length)
+        if len(header) != header_length:
+            raise ResultBundleError("NPY header is truncated")
+        try:
+            document = ast.literal_eval(header.decode("latin1").strip())
+        except (UnicodeError, SyntaxError, ValueError, MemoryError) as exc:
+            raise ResultBundleError("NPY header dictionary is invalid") from exc
+        if not isinstance(document, dict) or set(document) != {"descr", "fortran_order", "shape"}:
+            raise ResultBundleError("NPY header has unknown or missing fields")
+        dtype = document["descr"]
+        fortran = document["fortran_order"]
+        shape = document["shape"]
+        if not isinstance(dtype, str) or not isinstance(fortran, bool):
+            raise ResultBundleError("NPY dtype or order is invalid")
+        if (
+            not isinstance(shape, tuple)
+            or len(shape) > 4
+            or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in shape)
+        ):
+            raise ResultBundleError("NPY shape is invalid")
+        payload_offset = stream.tell()
+    return dtype, fortran, tuple(shape), payload_offset
+
+
+def validate_npy_file(
+    path: Path,
+    contract: ArrayContract,
+    *,
+    expected_identity: FileIdentity | None = None,
+) -> np.memmap:
+    before = _ordinary_file_stat(path)
+    if (
+        expected_identity is not None
+        and _file_identity(before) != expected_identity
+    ):
+        raise ResultBundleError(f"NPY file changed before consumption: {path.name}")
+    dtype, fortran, shape, payload_offset = _npy_header(path)
+    if dtype != contract.dtype or shape != contract.shape or fortran:
+        raise ResultBundleError(
+            f"NPY contract mismatch for {path.name}: {dtype} {shape} fortran={fortran}"
+        )
+    expected_payload = math.prod(shape) * np.dtype(contract.dtype).itemsize
+    if before.st_size != payload_offset + expected_payload:
+        raise ResultBundleError(f"NPY byte length is inconsistent: {path.name}")
+    immediately_before = _ordinary_file_stat(path)
+    trusted_identity = expected_identity or _file_identity(before)
+    if _file_identity(immediately_before) != trusted_identity:
+        raise ResultBundleError(f"NPY file changed before consumption: {path.name}")
+    try:
+        array = np.load(path, mmap_mode="r", allow_pickle=False)
+    except (OSError, ValueError, MemoryError) as exc:
+        raise ResultBundleError(f"NPY data cannot be opened safely: {path.name}") from exc
+    immediately_after = _ordinary_file_stat(path)
+    if _file_identity(immediately_after) != trusted_identity:
+        raise ResultBundleError(f"NPY file changed during consumption: {path.name}")
+    if array.dtype.str != contract.dtype or tuple(array.shape) != shape or not array.flags.c_contiguous:
+        raise ResultBundleError(f"NPY loaded representation is inconsistent: {path.name}")
+    return array
+
+
+def _sha256_file_identity(path: Path) -> tuple[str, int, FileIdentity]:
+    before = _ordinary_file_stat(path)
+    digest = hashlib.sha256()
+    completed = 0
+    with path.open("rb") as stream:
+        handle_before = os.fstat(stream.fileno())
+        if _file_identity(handle_before) != _file_identity(before):
+            raise ResultBundleError(
+                f"Result file changed before hashing: {path.name}"
+            )
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+            completed += len(chunk)
+        handle_after = os.fstat(stream.fileno())
+    after = _ordinary_file_stat(path)
+    if (
+        _file_identity(before) != _file_identity(handle_before)
+        or _file_identity(handle_before) != _file_identity(handle_after)
+        or _file_identity(handle_after) != _file_identity(after)
+        or completed != before.st_size
+    ):
+        raise ResultBundleError(f"Result file changed while hashing: {path.name}")
+    return digest.hexdigest(), completed, _file_identity(before)
+
+
+def _sha256_file(path: Path) -> str:
+    digest, _length, _identity = _sha256_file_identity(path)
+    return digest
+
+
+def _descriptor(path: Path, relative: str, array: np.ndarray) -> dict[str, Any]:
+    return {
+        "path": relative,
+        "dtype": array.dtype.str,
+        "shape": list(array.shape),
+        "byte_length": path.stat().st_size,
+        "sha256": _sha256_file(path),
+    }
+
+
+def _write_npy(path: Path, array: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raise ResultBundleError(f"Result array already exists: {path.name}")
+    with path.open("xb") as stream:
+        np.save(stream, array, allow_pickle=False)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _validate_array_input(name: str, array: np.ndarray) -> None:
+    if name not in RESULT_ARRAY_DTYPES:
+        raise ResultBundleError(f"unknown core Result array: {name}")
+    if not isinstance(array, np.ndarray):
+        raise ResultBundleError(f"{name} must be an ndarray without implicit conversion")
+    if array.dtype.str != RESULT_ARRAY_DTYPES[name] or not array.flags.c_contiguous:
+        raise ResultBundleError(f"{name} has an invalid dtype or memory order")
+    if array.dtype.fields is not None or array.dtype.hasobject:
+        raise ResultBundleError(f"{name} uses an object or structured dtype")
+
+
+def _validate_semantics(arrays: Mapping[str, np.ndarray]) -> tuple[int, int]:
+    if (
+        not set(CORE_ARRAY_DTYPES).issubset(arrays)
+        or not set(arrays).issubset(RESULT_ARRAY_DTYPES)
+    ):
+        raise ResultBundleError("core Result array set is incomplete or contains unknown names")
+    for name, array in arrays.items():
+        _validate_array_input(name, array)
+    positions = arrays["positions"]
+    count = positions.shape[0] if positions.ndim == 2 else -1
+    if positions.shape != (count, 3):
+        raise ResultBundleError("positions must have shape (N,3)")
+    for name in ("colors",):
+        if arrays[name].shape != (count, 3):
+            raise ResultBundleError(f"{name} must have shape (N,3)")
+    for name in ("confidence", "radius", "source_frame"):
+        if arrays[name].shape != (count,):
+            raise ResultBundleError(f"{name} must have shape (N,)")
+    camera_to_world = arrays["camera_to_world"]
+    frame_count = camera_to_world.shape[0] if camera_to_world.ndim == 3 else -1
+    expected_frames = {
+        "camera_to_world": (frame_count, 4, 4),
+        "model_intrinsics": (frame_count, 3, 3),
+        "source_intrinsics": (frame_count, 3, 3),
+        "model_fov_radians": (frame_count, 2),
+        "source_pts_seconds": (frame_count,),
+        "frame_type": (frame_count,),
+        "source_to_model": (3, 3),
+    }
+    for name, shape in expected_frames.items():
+        if arrays[name].shape != shape:
+            raise ResultBundleError(f"{name} must have shape {shape}")
+    if "sky_fraction" in arrays:
+        sky_fraction = arrays["sky_fraction"]
+        if sky_fraction.shape != (frame_count,):
+            raise ResultBundleError("sky_fraction must have shape (F,)")
+        if (
+            not bool(np.isfinite(sky_fraction).all())
+            or not bool(((sky_fraction >= 0) & (sky_fraction <= 1)).all())
+        ):
+            raise ResultBundleError("sky_fraction must be finite and within [0,1]")
+    for name in (
+        "positions", "confidence", "radius", "camera_to_world", "model_intrinsics",
+        "source_intrinsics", "model_fov_radians", "source_pts_seconds", "source_to_model",
+    ):
+        if not bool(np.isfinite(arrays[name]).all()):
+            raise ResultBundleError(f"{name} contains non-finite values")
+    if not bool((arrays["radius"] > 0).all()):
+        raise ResultBundleError("radius contains non-positive values")
+    if count and not bool((arrays["source_frame"] < frame_count).all()):
+        raise ResultBundleError("source_frame refers outside the camera arrays")
+    if frame_count < 1:
+        raise ResultBundleError("Result must contain at least one camera frame")
+    if not bool(np.isin(arrays["frame_type"], (0, 1, 2)).all()):
+        raise ResultBundleError("frame_type contains an unknown code")
+    timestamps = arrays["source_pts_seconds"]
+    if len(timestamps) > 1 and not bool((np.diff(timestamps) > 0).all()):
+        raise ResultBundleError("source timestamps are not strictly increasing")
+    fov = arrays["model_fov_radians"]
+    if not bool(((fov > 0) & (fov < math.pi)).all()):
+        raise ResultBundleError("model FOV is outside (0,pi)")
+    for name in ("model_intrinsics", "source_intrinsics"):
+        intrinsics = arrays[name].astype(np.float64, copy=False)
+        if not bool((intrinsics[:, 0, 0] > 0).all() and (intrinsics[:, 1, 1] > 0).all()):
+            raise ResultBundleError(f"{name} contains non-positive focal length")
+        expected_last = np.broadcast_to((0.0, 0.0, 1.0), (frame_count, 3))
+        if not np.allclose(intrinsics[:, 2, :], expected_last, atol=1e-6, rtol=0):
+            raise ResultBundleError(f"{name} has a malformed homogeneous row")
+        if not np.allclose(intrinsics[:, 0, 1], 0, atol=1e-6, rtol=0) or not np.allclose(intrinsics[:, 1, 0], 0, atol=1e-6, rtol=0):
+            raise ResultBundleError(f"{name} contains unsupported skew")
+    homogeneous = np.broadcast_to((0.0, 0.0, 0.0, 1.0), (frame_count, 4))
+    if not np.allclose(camera_to_world[:, 3, :], homogeneous, atol=1e-5, rtol=0):
+        raise ResultBundleError("camera_to_world has malformed homogeneous rows")
+    rotations = camera_to_world[:, :3, :3].astype(np.float64)
+    identities = np.einsum("fji,fjk->fik", rotations, rotations)
+    if not np.allclose(identities, np.eye(3), atol=1e-4, rtol=0):
+        raise ResultBundleError("camera_to_world rotation is not orthonormal")
+    determinants = np.linalg.det(rotations)
+    if not np.allclose(determinants, 1.0, atol=1e-4, rtol=0):
+        raise ResultBundleError("camera_to_world rotation is reflected or non-rigid")
+    transform = arrays["source_to_model"]
+    if abs(float(np.linalg.det(transform))) <= 1e-12:
+        raise ResultBundleError("source_to_model is singular")
+    if not np.allclose(transform[2], (0.0, 0.0, 1.0), atol=1e-9, rtol=0):
+        raise ResultBundleError("source_to_model is not an affine pixel transform")
+    mapped_source = np.einsum(
+        "ij,fjk->fik",
+        transform.astype(np.float64, copy=False),
+        arrays["source_intrinsics"].astype(np.float64, copy=False),
+    )
+    if not np.allclose(
+        mapped_source,
+        arrays["model_intrinsics"].astype(np.float64, copy=False),
+        atol=1e-4,
+        rtol=1e-5,
+    ):
+        raise ResultBundleError("source/model intrinsics disagree with source_to_model")
+    expected_first_camera = np.array(
+        (
+            (1.0, 0.0, 0.0, 0.0),
+            (0.0, 0.0, -1.0, 0.0),
+            (0.0, 1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        ),
+        dtype=np.float64,
+    )
+    if not np.allclose(camera_to_world[0], expected_first_camera, atol=1e-4, rtol=0):
+        raise ResultBundleError("first camera does not define the Reconstruction Frame")
+    return count, frame_count
+
+
+def _walk_plain_files(root: Path, *, ignore_dense: bool = False) -> set[str]:
+    found: set[str] = set()
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if ignore_dense and directory == root and entry.name == "dense":
+                    # Dense is optional and untrusted. Core validation never follows it.
+                    continue
+                path = Path(entry.path)
+                if entry.is_symlink() or is_reparse_point(path):
+                    raise ResultBundleError("Result contains linked or reparse content")
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                elif entry.is_file(follow_symlinks=False):
+                    found.add(path.relative_to(root).as_posix())
+                else:
+                    raise ResultBundleError("Result contains a non-file non-directory entry")
+    return found
+
+
+def _validate_source_view_contract(
+    manifest: Mapping[str, Any], arrays: Mapping[str, np.ndarray]
+) -> None:
+    """Validate optional source-alignment metadata without weakening old Results."""
+
+    source_display = manifest.get("source_display")
+    model_coverage = manifest.get("model_coverage")
+    if (source_display is None) != (model_coverage is None):
+        raise ResultBundleError(
+            "source_display and model_coverage must be present together"
+        )
+    if source_display is None:
+        return
+    display = require_exact_object(
+        source_display,
+        {"width", "height", "display_transform"},
+        label="source_display",
+    )
+    for name in ("width", "height"):
+        value = display[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ResultBundleError(f"source_display {name} is invalid")
+    if display["display_transform"] not in DISPLAY_TRANSFORMS:
+        raise ResultBundleError("source_display Display Transform is unsupported")
+
+    coverage = require_exact_object(
+        model_coverage,
+        {
+            "coordinate_space",
+            "polygon",
+            "source_fraction",
+            "model_width",
+            "model_height",
+        },
+        label="model_coverage",
+    )
+    if coverage["coordinate_space"] != "source-display-pixel-edges":
+        raise ResultBundleError("Model Coverage coordinate space is unsupported")
+    model_width = coverage["model_width"]
+    model_height = coverage["model_height"]
+    if (
+        isinstance(model_width, bool)
+        or isinstance(model_height, bool)
+        or not isinstance(model_width, int)
+        or not isinstance(model_height, int)
+        or model_width != 518
+        or not 14 <= model_height <= 518
+        or model_height % 14
+    ):
+        raise ResultBundleError("Model Coverage grid is not the frozen 518/14 grid")
+    polygon = coverage["polygon"]
+    if (
+        not isinstance(polygon, list)
+        or len(polygon) != 4
+        or any(not isinstance(point, list) or len(point) != 2 for point in polygon)
+    ):
+        raise ResultBundleError("Model Coverage polygon must contain four points")
+    coordinates = np.asarray(polygon, dtype=np.float64)
+    if (
+        coordinates.shape != (4, 2)
+        or not bool(np.isfinite(coordinates).all())
+        or not bool(
+            ((coordinates[:, 0] >= 0) & (coordinates[:, 0] <= display["width"])).all()
+        )
+        or not bool(
+            ((coordinates[:, 1] >= 0) & (coordinates[:, 1] <= display["height"])).all()
+        )
+    ):
+        raise ResultBundleError(
+            "Model Coverage polygon lies outside source-display pixel edges"
+        )
+    homogeneous = np.concatenate(
+        (coordinates, np.ones((4, 1), dtype=np.float64)), axis=1
+    )
+    mapped = (
+        arrays["source_to_model"].astype(np.float64, copy=False) @ homogeneous.T
+    ).T
+    expected = np.asarray(
+        (
+            (0.0, 0.0, 1.0),
+            (float(model_width), 0.0, 1.0),
+            (float(model_width), float(model_height), 1.0),
+            (0.0, float(model_height), 1.0),
+        ),
+        dtype=np.float64,
+    )
+    if not np.allclose(mapped, expected, atol=1e-6, rtol=1e-9):
+        raise ResultBundleError(
+            "Model Coverage polygon disagrees with source_to_model"
+        )
+    x = coordinates[:, 0]
+    y = coordinates[:, 1]
+    area = abs(
+        float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+    ) / 2.0
+    actual_fraction = area / float(display["width"] * display["height"])
+    recorded_fraction = coverage["source_fraction"]
+    if (
+        isinstance(recorded_fraction, bool)
+        or not isinstance(recorded_fraction, (int, float))
+        or not math.isfinite(float(recorded_fraction))
+        or not 0 < recorded_fraction <= 1
+        or not math.isclose(
+            float(recorded_fraction), actual_fraction, abs_tol=1e-9, rel_tol=1e-9
+        )
+    ):
+        raise ResultBundleError(
+            "Model Coverage source fraction disagrees with its polygon"
+        )
+
+
+def validate_result_bundle(root: Path) -> dict[str, Any]:
+    root = Path(os.path.abspath(root))
+    if not root.is_dir() or root.is_symlink() or is_reparse_point(root):
+        raise ResultBundleError("Result root is not an ordinary directory")
+    manifest = read_json(root / "manifest.json")
+    if isinstance(manifest, dict):
+        version = manifest.get("schema_version")
+        match = (
+            re.fullmatch(r"([0-9]+)\.[0-9]+\.[0-9]+", version)
+            if isinstance(version, str)
+            else None
+        )
+        if match is not None and int(match.group(1)) != 1:
+            raise ResultBundleError(
+                "Incompatible Result: unknown schema major is retained but inactive"
+            )
+    fields = {
+        "schema_version", "result_id", "job_id", "created_utc", "target_scene",
+        "timeline_start", "source", "contracts", "profile", "coordinate_system",
+        "counts", "arrays", "confidence_statistics", "warnings", "provenance", "logs",
+    }
+    if (
+        not isinstance(manifest, dict)
+        or not fields.issubset(manifest)
+        or not set(manifest).issubset(
+            fields
+            | {
+                "dense_predictions",
+                "window_alignment",
+                "sky_statistics",
+                "source_display",
+                "model_coverage",
+            }
+        )
+    ):
+        raise ResultBundleError("Result manifest has unknown or missing fields")
+    if manifest["schema_version"] != RESULT_SCHEMA_VERSION:
+        raise ResultBundleError("unsupported Reconstruction Result schema version")
+    if not RESULT_ID.fullmatch(str(manifest["result_id"])) or not JOB_ID.fullmatch(str(manifest["job_id"])):
+        raise ResultBundleError("Result or Job identity is invalid")
+    created_utc = require_text(manifest["created_utc"], label="created_utc", maximum=128)
+    try:
+        parsed_created = datetime.fromisoformat(created_utc)
+    except ValueError as exc:
+        raise ResultBundleError("created_utc is not an ISO-8601 timestamp") from exc
+    if parsed_created.tzinfo is None or parsed_created.utcoffset() is None:
+        raise ResultBundleError("created_utc must include an offset")
+    if parsed_created.utcoffset().total_seconds() != 0:
+        raise ResultBundleError("created_utc must be expressed in UTC")
+    target = require_exact_object(
+        manifest["target_scene"], {"blend_path", "scene_uuid", "scene_name"}, label="target_scene"
+    )
+    for name in target:
+        require_text(target[name], label=f"target_scene.{name}", maximum=32767)
+    if isinstance(manifest["timeline_start"], bool) or not isinstance(manifest["timeline_start"], int):
+        raise ResultBundleError("timeline_start is invalid")
+    source = require_exact_object(
+        manifest["source"],
+        {"absolute_path", "scene_relative_path", "size_bytes", "modification_time_ns", "sha256"},
+        label="source",
+    )
+    if not Path(require_text(source["absolute_path"], label="source.absolute_path", maximum=32767)).is_absolute():
+        raise ResultBundleError("source absolute path is invalid")
+    relative_source = source["scene_relative_path"]
+    if relative_source is not None:
+        if (
+            not isinstance(relative_source, str)
+            or not relative_source.startswith("//")
+            or len(relative_source.encode("utf-8")) > 32767
+        ):
+            raise ResultBundleError("source scene-relative path is invalid")
+    for name in ("size_bytes", "modification_time_ns"):
+        if isinstance(source[name], bool) or not isinstance(source[name], int) or source[name] < 1:
+            raise ResultBundleError(f"source {name} is invalid")
+    if not SHA256.fullmatch(str(source["sha256"])):
+        raise ResultBundleError("source checksum is invalid")
+    contracts = require_exact_object(
+        manifest["contracts"], {"job_spec", "events", "result"}, label="contracts"
+    )
+    if contracts != {
+        "job_spec": SCHEMA_VERSION,
+        "events": SCHEMA_VERSION,
+        "result": RESULT_SCHEMA_VERSION,
+    }:
+        raise ResultBundleError("manifest names unsupported contract versions")
+    profile = manifest["profile"]
+    profile_fields = {
+        "name", "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget"
+    }
+    if (
+        not isinstance(profile, dict)
+        or not profile_fields.issubset(profile)
+        or not set(profile).issubset(profile_fields | {"retain_dense_predictions"})
+    ):
+        raise ResultBundleError("profile has unknown or missing fields")
+    if (
+        isinstance(profile["import_point_budget"], bool)
+        or not isinstance(profile["import_point_budget"], int)
+        or not 1 <= profile["import_point_budget"] <= 50_000_000
+    ):
+        raise ResultBundleError("profile point budget is invalid")
+    require_text(profile["name"], label="profile.name", maximum=128)
+    for name in ("confidence_cutoff_percent", "depth_cutoff_percent"):
+        value = profile[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 100:
+            raise ResultBundleError(f"profile {name} is invalid")
+    retained_dense = profile.get("retain_dense_predictions", False)
+    if not isinstance(retained_dense, bool):
+        raise ResultBundleError("profile Dense Predictions retention is invalid")
+    descriptor = None
+    if "dense_predictions" in manifest:
+        try:
+            descriptor = validate_dense_descriptor(manifest["dense_predictions"])
+        except Exception as exc:
+            raise ResultBundleError(f"Dense Predictions descriptor is invalid: {exc}") from exc
+    if retained_dense != (descriptor is not None):
+        raise ResultBundleError("profile and Dense Predictions descriptor disagree")
+    coordinate = require_exact_object(
+        manifest["coordinate_system"],
+        {"name", "handedness", "camera_local_axes", "voxel_origin", "voxel_edge_length"},
+        label="coordinate_system",
+    )
+    if coordinate["name"] != "blender-z-up-reconstruction-frame" or coordinate["handedness"] != "right":
+        raise ResultBundleError("coordinate system is unsupported")
+    if coordinate["camera_local_axes"] != "+X right,+Y up,-Z forward":
+        raise ResultBundleError("camera local-axis convention is invalid")
+    edge = coordinate["voxel_edge_length"]
+    if (
+        coordinate["voxel_origin"] != [0.0, 0.0, 0.0]
+        or isinstance(edge, bool)
+        or not isinstance(edge, (int, float))
+        or not math.isfinite(edge)
+        or edge <= 0
+    ):
+        raise ResultBundleError("voxel grid provenance is invalid")
+    counts = require_exact_object(manifest["counts"], {"frames", "points"}, label="counts")
+    if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in counts.values()):
+        raise ResultBundleError("Result counts are invalid")
+    descriptors = manifest["arrays"]
+    if (
+        not isinstance(descriptors, dict)
+        or not set(CORE_ARRAY_DTYPES).issubset(descriptors)
+        or not set(descriptors).issubset(RESULT_ARRAY_DTYPES)
+    ):
+        raise ResultBundleError("Result array descriptors are incomplete or unknown")
+    arrays: dict[str, np.ndarray] = {}
+    declared = {"manifest.json"}
+    for name, raw in descriptors.items():
+        descriptor = require_exact_object(
+            raw, {"path", "dtype", "shape", "byte_length", "sha256"}, label=f"arrays.{name}"
+        )
+        relative = str(descriptor["path"])
+        if relative != f"arrays/{name}.npy":
+            raise ResultBundleError(f"array path is not canonical: {name}")
+        path = safe_relative_file(root, relative)
+        raw_shape = descriptor["shape"]
+        if (
+            not isinstance(raw_shape, list)
+            or len(raw_shape) > 4
+            or not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in raw_shape)
+        ):
+            raise ResultBundleError(f"array descriptor shape is invalid: {name}")
+        if (
+            isinstance(descriptor["byte_length"], bool)
+            or not isinstance(descriptor["byte_length"], int)
+            or descriptor["byte_length"] < 1
+            or not SHA256.fullmatch(str(descriptor["sha256"]))
+        ):
+            raise ResultBundleError(f"array descriptor size or checksum is invalid: {name}")
+        shape = tuple(raw_shape)
+        contract = ArrayContract(str(descriptor["dtype"]), shape)
+        if contract.dtype != RESULT_ARRAY_DTYPES[name]:
+            raise ResultBundleError(f"array descriptor dtype is invalid: {name}")
+        digest, byte_length, trusted_identity = _sha256_file_identity(path)
+        if (
+            byte_length != descriptor["byte_length"]
+            or digest != descriptor["sha256"]
+        ):
+            raise ResultBundleError(f"array descriptor length or checksum is invalid: {name}")
+        array = validate_npy_file(
+            path,
+            contract,
+            expected_identity=trusted_identity,
+        )
+        arrays[name] = array
+        declared.add(relative)
+    point_count, frame_count = _validate_semantics(arrays)
+    _validate_source_view_contract(manifest, arrays)
+    if counts != {"frames": frame_count, "points": point_count}:
+        raise ResultBundleError("manifest counts disagree with core arrays")
+    if point_count and not np.allclose(
+        arrays["radius"], float(edge) / 2.0, atol=1e-6, rtol=1e-6
+    ):
+        raise ResultBundleError("point radius disagrees with the retained voxel grid")
+    statistics = require_exact_object(
+        manifest["confidence_statistics"], {"p0", "p5", "p25", "p50", "p75", "p95", "p100"}, label="confidence_statistics"
+    )
+    if point_count:
+        actual = np.percentile(arrays["confidence"], (0, 5, 25, 50, 75, 95, 100))
+        recorded = np.array([statistics[name] for name in ("p0", "p5", "p25", "p50", "p75", "p95", "p100")], dtype=np.float64)
+        if not np.allclose(actual, recorded, atol=1e-6, rtol=1e-6):
+            raise ResultBundleError("confidence statistics disagree with retained values")
+    elif any(value is not None for value in statistics.values()):
+        raise ResultBundleError("empty point cloud must use null confidence statistics")
+    sky_statistics = manifest.get("sky_statistics")
+    if "sky_fraction" in arrays:
+        sky_statistics = require_exact_object(
+            sky_statistics,
+            {"minimum", "median", "p95", "maximum", "count_above_95_percent"},
+            label="sky_statistics",
+        )
+        actual_sky = np.percentile(arrays["sky_fraction"], (0, 50, 95, 100))
+        recorded_sky = np.array(
+            [
+                sky_statistics["minimum"],
+                sky_statistics["median"],
+                sky_statistics["p95"],
+                sky_statistics["maximum"],
+            ],
+            dtype=np.float64,
+        )
+        if (
+            not np.allclose(actual_sky, recorded_sky, atol=1e-6, rtol=1e-6)
+            or isinstance(sky_statistics["count_above_95_percent"], bool)
+            or not isinstance(sky_statistics["count_above_95_percent"], int)
+            or sky_statistics["count_above_95_percent"]
+            != int(np.count_nonzero(arrays["sky_fraction"] > np.float32(0.95)))
+        ):
+            raise ResultBundleError("Sky Mask statistics disagree with sky_fraction")
+    elif sky_statistics is not None:
+        raise ResultBundleError("Sky Mask statistics require sky_fraction")
+    warnings = manifest["warnings"]
+    if not isinstance(warnings, list):
+        raise ResultBundleError("warnings must be an array")
+    for warning in warnings:
+        record = require_exact_object(warning, {"code", "message"}, label="warning")
+        require_text(record["code"], label="warning.code", maximum=128)
+        require_text(record["message"], label="warning.message", maximum=16384)
+    window_alignment = manifest.get("window_alignment")
+    if window_alignment is not None:
+        alignment = require_exact_object(
+            window_alignment,
+            {
+                "schema_version", "rule_version", "strategy", "window_frames", "overlap_keyframes",
+                "scale_frames", "keyframe_interval", "loop_closure", "pose_graph",
+                "bundle_adjustment", "global_optimization", "boundaries",
+            },
+            label="window_alignment",
+        )
+        if alignment != {
+            **alignment,
+            "schema_version": "1.0.0",
+            "rule_version": "1.0.0",
+            "strategy": "rolling-similarity",
+            "window_frames": 64,
+            "overlap_keyframes": 16,
+            "scale_frames": 8,
+            "keyframe_interval": 1,
+            "loop_closure": False,
+            "pose_graph": False,
+            "bundle_adjustment": False,
+            "global_optimization": False,
+        }:
+            raise ResultBundleError("window alignment is not the fixed v1 contract")
+        boundaries = alignment["boundaries"]
+        expected_boundaries = math.ceil(max(0, frame_count - 64) / 48)
+        if not isinstance(boundaries, list) or len(boundaries) != expected_boundaries:
+            raise ResultBundleError("window alignment boundary count is inconsistent")
+        previous_end = -1
+        triggered_count = 0
+        for index, raw in enumerate(boundaries):
+            boundary = require_exact_object(
+                raw,
+                {
+                    "source_frame_start", "source_frame_end", "paired_keyframes",
+                    "relative_scale", "rotation_difference_degrees",
+                    "normalized_camera_center_distance", "absolute_log_depth_ratio",
+                    "camera_pair_count", "depth_pixel_count", "triggered_conditions",
+                },
+                label=f"window_alignment.boundaries[{index}]",
+            )
+            start, end = boundary["source_frame_start"], boundary["source_frame_end"]
+            if (
+                not all(isinstance(value, int) and not isinstance(value, bool) for value in (start, end))
+                or end - start != 15
+                or start <= previous_end
+                or not 0 <= start <= end < frame_count
+                or boundary["paired_keyframes"] != 16
+                or boundary["camera_pair_count"] != 16
+                or not isinstance(boundary["depth_pixel_count"], int)
+                or isinstance(boundary["depth_pixel_count"], bool)
+                or boundary["depth_pixel_count"] < 1
+            ):
+                raise ResultBundleError("window alignment boundary identity is invalid")
+            previous_end = end
+            for label in (
+                "rotation_difference_degrees",
+                "normalized_camera_center_distance",
+                "absolute_log_depth_ratio",
+            ):
+                summary = require_exact_object(boundary[label], {"median", "p95"}, label=label)
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or value < 0
+                    for value in summary.values()
+                ):
+                    raise ResultBundleError("window alignment residual is invalid")
+            scale = boundary["relative_scale"]
+            if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(float(scale)) or not 1e-4 <= scale <= 1e4:
+                raise ResultBundleError("window alignment scale is invalid")
+            conditions = boundary["triggered_conditions"]
+            allowed = {
+                "paired_keyframes", "relative_scale", "rotation_p95",
+                "center_distance_p95", "log_depth_ratio_p95",
+            }
+            if not isinstance(conditions, list) or len(conditions) != len(set(conditions)) or not set(conditions) <= allowed:
+                raise ResultBundleError("window alignment warning conditions are invalid")
+            triggered_count += bool(conditions)
+        quality_warning_count = sum(
+            warning.get("code") == "quality_warning" for warning in warnings
+        )
+        if quality_warning_count != triggered_count:
+            raise ResultBundleError("window alignment Quality Warnings disagree with boundaries")
+    provenance_fields = {
+            "runtime_id", "worker_version", "job_spec_sha256", "model_sha256",
+            "source_sha256", "preprocessing_rule_version", "filtering_rule_version",
+            "point_reducer_rule_version", "resource_estimate_version", "models",
+            "gpu", "profile", "preprocessing", "inference", "suspension", "system",
+        }
+    provenance = manifest["provenance"]
+    if (
+        not isinstance(provenance, dict)
+        or not provenance_fields.issubset(provenance)
+        or not set(provenance).issubset(provenance_fields | {"sky_masking"})
+    ):
+        raise ResultBundleError("provenance has unknown or missing fields")
+    for name in ("runtime_id", "job_spec_sha256", "model_sha256", "source_sha256"):
+        if not SHA256.fullmatch(str(provenance[name])):
+            raise ResultBundleError(f"provenance checksum or identity is invalid: {name}")
+    if provenance["source_sha256"] != source["sha256"]:
+        raise ResultBundleError("source identity and provenance checksum disagree")
+    require_text(provenance["worker_version"], label="worker_version", maximum=128)
+    for name in (
+        "preprocessing_rule_version", "filtering_rule_version",
+        "point_reducer_rule_version", "resource_estimate_version",
+    ):
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", require_text(provenance[name], label=name, maximum=64)):
+            raise ResultBundleError(f"provenance rule version is invalid: {name}")
+    models = provenance["models"]
+    if not isinstance(models, list) or not models:
+        raise ResultBundleError("provenance models must be a non-empty array")
+    for raw in models:
+        model = require_exact_object(raw, {"id", "role", "sha256"}, label="provenance model")
+        require_text(model["id"], label="model.id", maximum=256)
+        if model["role"] not in {"reconstruction", "auxiliary", "fixture"}:
+            raise ResultBundleError("provenance model role is invalid")
+        if not SHA256.fullmatch(str(model["sha256"])):
+            raise ResultBundleError("provenance model checksum is invalid")
+    if not any(model["sha256"] == provenance["model_sha256"] for model in models):
+        raise ResultBundleError("primary model checksum is absent from provenance models")
+    sky_masking = provenance.get("sky_masking")
+    if sky_masking is not None:
+        sky_masking = require_exact_object(
+            sky_masking,
+            {
+                "enabled", "model_id", "model_sha256", "rule_version",
+                "preprocessing_version", "provider", "onnxruntime_version",
+                "batch_size", "onnx_threads", "cache_key", "cache_status",
+            },
+            label="sky_masking provenance",
+        )
+        if (
+            sky_masking["enabled"] is not True
+            or sky_masking["model_id"] != "skyseg"
+            or not SHA256.fullmatch(str(sky_masking["model_sha256"]))
+            or sky_masking["rule_version"] != "non-sky-confidence-gt-0.1-v1"
+            or sky_masking["preprocessing_version"]
+            != "skyseg-imagenet-320-bilinear-v1"
+            or sky_masking["provider"] != "CPUExecutionProvider"
+            or sky_masking["batch_size"] != 1
+            or isinstance(sky_masking["onnx_threads"], bool)
+            or not isinstance(sky_masking["onnx_threads"], int)
+            or not 1 <= sky_masking["onnx_threads"] <= 8
+            or not SHA256.fullmatch(str(sky_masking["cache_key"]))
+            or sky_masking["cache_status"]
+            not in {
+                "hit", "generated", "regenerated", "race-reused",
+                "generated-cache-write-failed",
+                "regenerated-cache-write-failed",
+            }
+        ):
+            raise ResultBundleError("Sky Mask provenance is invalid")
+        require_text(
+            sky_masking["onnxruntime_version"],
+            label="sky_masking.onnxruntime_version",
+            maximum=128,
+        )
+        if not any(
+            model
+            == {
+                "id": sky_masking["model_id"],
+                "role": "auxiliary",
+                "sha256": sky_masking["model_sha256"],
+            }
+            for model in models
+        ):
+            raise ResultBundleError("Sky Mask Auxiliary Model is absent from provenance")
+    if ("sky_fraction" in arrays) != (sky_masking is not None):
+        raise ResultBundleError("Sky Mask provenance and sky_fraction disagree")
+    gpu = provenance["gpu"]
+    if gpu is not None:
+        gpu = require_exact_object(
+            gpu,
+            {
+                "uuid", "name", "total_memory", "driver_version",
+                "compute_capability", "torch_version", "cuda_version",
+                "attention_backend",
+            },
+            label="provenance gpu",
+        )
+        for name in ("uuid", "name", "driver_version", "torch_version", "cuda_version", "attention_backend"):
+            require_text(gpu[name], label=f"gpu.{name}", maximum=256)
+        if isinstance(gpu["total_memory"], bool) or not isinstance(gpu["total_memory"], int) or gpu["total_memory"] <= 0:
+            raise ResultBundleError("gpu.total_memory is invalid")
+        capability = gpu["compute_capability"]
+        if not isinstance(capability, list) or len(capability) != 2 or not all(
+            isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in capability
+        ):
+            raise ResultBundleError("gpu.compute_capability is invalid")
+    profile_provenance = provenance["profile"]
+    profile_provenance_fields = {
+        "name", "settings_sha256", "camera_iterations",
+        "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget",
+    }
+    if (
+        not isinstance(profile_provenance, dict)
+        or not profile_provenance_fields.issubset(profile_provenance)
+        or not set(profile_provenance).issubset(
+            profile_provenance_fields | {"retain_dense_predictions"}
+        )
+    ):
+        raise ResultBundleError("provenance profile has unknown or missing fields")
+    require_text(profile_provenance["name"], label="profile.name", maximum=128)
+    if not SHA256.fullmatch(str(profile_provenance["settings_sha256"])):
+        raise ResultBundleError("profile settings checksum is invalid")
+    if profile_provenance["name"] != manifest["profile"]["name"]:
+        raise ResultBundleError("profile provenance disagrees with Result profile")
+    for name in (
+        "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget"
+    ):
+        if profile_provenance[name] != manifest["profile"][name]:
+            raise ResultBundleError(f"profile provenance disagrees with Result field: {name}")
+    provenance_retained_dense = profile_provenance.get("retain_dense_predictions", False)
+    if not isinstance(provenance_retained_dense, bool) or provenance_retained_dense != retained_dense:
+        raise ResultBundleError("profile provenance Dense Predictions setting disagrees")
+    preprocessing = require_exact_object(
+        provenance["preprocessing"],
+        {"image_size", "patch_size", "mode", "resize", "color", "normalization"},
+        label="provenance preprocessing",
+    )
+    if preprocessing != {
+        "image_size": 518,
+        "patch_size": 14,
+        "mode": "canonical-crop-v1",
+        "resize": "pillow-bicubic",
+        "color": "uint8-srgb",
+        "normalization": "float32-rgb-divide-255",
+    }:
+        raise ResultBundleError("preprocessing provenance is not the fixed native-v1 contract")
+    inference = require_exact_object(
+        provenance["inference"],
+        {
+            "mode", "keyframe_interval", "scale_frames", "window_frames",
+            "overlap_keyframes", "prediction_heads",
+        },
+        label="provenance inference",
+    )
+    if inference["mode"] not in {"streaming", "windowed", "fixture"}:
+        raise ResultBundleError("inference mode is invalid")
+    for name in ("keyframe_interval", "scale_frames", "window_frames", "overlap_keyframes"):
+        if isinstance(inference[name], bool) or not isinstance(inference[name], int) or inference[name] < 0:
+            raise ResultBundleError(f"inference {name} is invalid")
+    if inference["prediction_heads"] not in [["camera", "depth"], ["fixture"]]:
+        raise ResultBundleError("inference prediction heads are invalid")
+    if (inference["mode"] == "windowed") != (window_alignment is not None):
+        raise ResultBundleError("windowed inference and alignment provenance disagree")
+    suspension = require_exact_object(
+        provenance["suspension"], {"count", "total_seconds"}, label="provenance suspension"
+    )
+    if isinstance(suspension["count"], bool) or not isinstance(suspension["count"], int) or suspension["count"] < 0:
+        raise ResultBundleError("suspension count is invalid")
+    if isinstance(suspension["total_seconds"], bool) or not isinstance(suspension["total_seconds"], (int, float)) or not math.isfinite(float(suspension["total_seconds"])) or suspension["total_seconds"] < 0:
+        raise ResultBundleError("suspension duration is invalid")
+    system = require_exact_object(
+        provenance["system"],
+        {
+            "logical_processors", "global_thread_budget", "decoder_threads",
+            "preprocessing_threads", "output_threads", "onnx_threads",
+            "torch_intraop_threads", "torch_interop_threads", "priority",
+        },
+        label="provenance system",
+    )
+    for name in (
+        "logical_processors", "global_thread_budget", "decoder_threads",
+        "preprocessing_threads", "output_threads", "onnx_threads",
+        "torch_intraop_threads", "torch_interop_threads",
+    ):
+        if isinstance(system[name], bool) or not isinstance(system[name], int) or system[name] < 1:
+            raise ResultBundleError(f"system {name} is invalid")
+    require_text(system["priority"], label="system.priority", maximum=64)
+    if (
+        sky_masking is not None
+        and system["onnx_threads"] != sky_masking["onnx_threads"]
+    ):
+        raise ResultBundleError("Sky Mask and system ONNX thread provenance disagree")
+    logs = manifest["logs"]
+    if not isinstance(logs, list):
+        raise ResultBundleError("logs must be an array")
+    for raw in logs:
+        descriptor = require_exact_object(raw, {"path", "byte_length", "sha256"}, label="log")
+        relative_log = require_text(descriptor["path"], label="log.path", maximum=32767)
+        if not relative_log.startswith("logs/"):
+            raise ResultBundleError("log path is not canonical")
+        if (
+            isinstance(descriptor["byte_length"], bool)
+            or not isinstance(descriptor["byte_length"], int)
+            or descriptor["byte_length"] < 0
+            or not SHA256.fullmatch(str(descriptor["sha256"]))
+        ):
+            raise ResultBundleError("log descriptor size or checksum is invalid")
+        path = safe_relative_file(root, relative_log)
+        if not path.is_file() or path.is_symlink() or is_reparse_point(path):
+            raise ResultBundleError("declared log is not an ordinary file")
+        if path.stat().st_size != descriptor["byte_length"] or _sha256_file(path) != descriptor["sha256"]:
+            raise ResultBundleError("log descriptor length or checksum is invalid")
+        declared.add(relative_log)
+    if _walk_plain_files(root, ignore_dense=descriptor is not None) != declared:
+        raise ResultBundleError("Result contains undeclared or missing files")
+    return manifest
+
+
+def publish_result_bundle(
+    publication: ResultPublication,
+    *,
+    cancel: CancelCheck,
+    disk_check: DiskCheck,
+    estimated_total_bytes: int,
+) -> PublishedResult:
+    project_root = Path(os.path.abspath(publication.project_root))
+    if publication.voxel_origin != (0.0, 0.0, 0.0):
+        raise ResultBundleError("Point Reducer origin must be the fixed Reconstruction origin")
+    results_root = project_root / "results"
+    diagnostics_root = project_root / "diagnostics"
+    for directory in (project_root, results_root, diagnostics_root):
+        if not directory.is_dir() or directory.is_symlink() or is_reparse_point(directory):
+            raise ResultBundleError(f"Project Result path is not an ordinary directory: {directory.name}")
+    result_id = publication.result_id or f"result-{uuid.uuid4().hex}"
+    if not RESULT_ID.fullmatch(result_id) or not JOB_ID.fullmatch(publication.job_id):
+        raise ResultBundleError("Result or Job identity is invalid")
+    created_utc = publication.created_utc or datetime.now(timezone.utc).isoformat()
+    timestamp = re.sub(r"[^0-9]", "", created_utc)[:14]
+    if len(timestamp) != 14:
+        raise ResultBundleError("created_utc cannot form a safe Result directory name")
+    final = results_root / f"{timestamp}Z-{publication.job_id[4:12]}"
+    staging = results_root / f".staging-{result_id}-{uuid.uuid4().hex[:8]}"
+    if final.exists() or staging.exists():
+        raise ResultBundleError("Result publication destination already exists")
+    staging.mkdir()
+    committed = False
+    remaining = int(estimated_total_bytes)
+    try:
+        dense_descriptor = None
+        if publication.dense_component is not None:
+            if cancel():
+                raise ResultCancelled("Result publication was cancelled before dense commit")
+            dense_source = Path(os.path.abspath(publication.dense_component.staging_directory))
+            if (
+                dense_source.parent != results_root
+                or not dense_source.name.startswith(".dense-staging-")
+                or not dense_source.is_dir()
+                or dense_source.is_symlink()
+                or is_reparse_point(dense_source)
+            ):
+                raise ResultBundleError("Dense Predictions staging path is invalid")
+            dense_destination = staging / "dense"
+            os.replace(dense_source, dense_destination)
+            dense_descriptor = validate_dense_descriptor(
+                publication.dense_component.descriptor
+            )
+            validate_dense_component(staging, dense_descriptor)
+        descriptors: dict[str, dict[str, Any]] = {}
+        for name in sorted(publication.arrays):
+            if cancel():
+                raise ResultCancelled("Result publication was cancelled before commit")
+            array = publication.arrays[name]
+            _validate_array_input(name, array)
+            disk_check(max(0, remaining))
+            relative = f"arrays/{name}.npy"
+            path = safe_relative_file(staging, relative)
+            _write_npy(path, array)
+            validate_npy_file(path, ArrayContract(array.dtype.str, tuple(array.shape)))
+            descriptors[name] = _descriptor(path, relative, array)
+            remaining = max(0, remaining - path.stat().st_size)
+        _validate_semantics(publication.arrays)
+        log_path = safe_relative_file(staging, "logs/worker.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_bytes(b"")
+        log_descriptor = {
+            "path": "logs/worker.log", "byte_length": 0,
+            "sha256": hashlib.sha256(b"").hexdigest(),
+        }
+        confidence = publication.arrays["confidence"]
+        if len(confidence):
+            percentiles = np.percentile(confidence, (0, 5, 25, 50, 75, 95, 100))
+            statistics = {
+                name: float(value)
+                for name, value in zip(("p0", "p5", "p25", "p50", "p75", "p95", "p100"), percentiles)
+            }
+        else:
+            statistics = {name: None for name in ("p0", "p5", "p25", "p50", "p75", "p95", "p100")}
+        sky_statistics = None
+        if "sky_fraction" in publication.arrays:
+            sky_fraction = publication.arrays["sky_fraction"]
+            sky_percentiles = np.percentile(sky_fraction, (0, 50, 95, 100))
+            sky_statistics = {
+                "minimum": float(sky_percentiles[0]),
+                "median": float(sky_percentiles[1]),
+                "p95": float(sky_percentiles[2]),
+                "maximum": float(sky_percentiles[3]),
+                "count_above_95_percent": int(
+                    np.count_nonzero(sky_fraction > np.float32(0.95))
+                ),
+            }
+        manifest = {
+            "schema_version": RESULT_SCHEMA_VERSION,
+            "result_id": result_id,
+            "job_id": publication.job_id,
+            "created_utc": created_utc,
+            "target_scene": dict(publication.target_scene),
+            "timeline_start": int(publication.timeline_start),
+            "source": dict(publication.source),
+            "contracts": {"job_spec": SCHEMA_VERSION, "events": SCHEMA_VERSION, "result": RESULT_SCHEMA_VERSION},
+            "profile": dict(publication.profile),
+            "coordinate_system": {
+                "name": "blender-z-up-reconstruction-frame",
+                "handedness": "right",
+                "camera_local_axes": "+X right,+Y up,-Z forward",
+                "voxel_origin": list(publication.voxel_origin),
+                "voxel_edge_length": float(publication.voxel_edge_length),
+            },
+            "counts": {
+                "frames": int(publication.arrays["camera_to_world"].shape[0]),
+                "points": int(publication.arrays["positions"].shape[0]),
+            },
+            "arrays": descriptors,
+            "confidence_statistics": statistics,
+            "warnings": [dict(item) for item in publication.warnings],
+            "provenance": dict(publication.provenance),
+            "logs": [log_descriptor],
+        }
+        if (
+            publication.source_display is None
+        ) != (publication.model_coverage is None):
+            raise ResultBundleError(
+                "source_display and model_coverage must be published together"
+            )
+        if publication.source_display is not None:
+            manifest["source_display"] = dict(publication.source_display)
+            manifest["model_coverage"] = dict(publication.model_coverage)
+        if dense_descriptor is not None:
+            manifest["dense_predictions"] = dense_descriptor
+        if publication.window_alignment is not None:
+            manifest["window_alignment"] = dict(publication.window_alignment)
+        if sky_statistics is not None:
+            manifest["sky_statistics"] = sky_statistics
+        if cancel():
+            raise ResultCancelled("Result publication was cancelled before commit")
+        disk_check(max(0, remaining))
+        atomic_write_json(staging / "manifest.json", manifest)
+        validate_result_bundle(staging)
+        if dense_descriptor is not None:
+            validate_dense_component(staging, dense_descriptor)
+        if cancel():
+            raise ResultCancelled("Result publication was cancelled before commit")
+        os.replace(staging, final)
+        committed = True
+        return PublishedResult(result_id, final, manifest)
+    except Exception as exc:
+        if not committed and staging.exists():
+            reason = "cancelled" if isinstance(exc, ResultCancelled) else "failed"
+            destination = diagnostics_root / f"{publication.job_id}--result-{reason}"
+            if destination.exists():
+                destination = diagnostics_root / f"{publication.job_id}--result-{reason}-{uuid.uuid4().hex[:8]}"
+            os.replace(staging, destination)
+            atomic_write_json(
+                destination / "failure.json",
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "job_id": publication.job_id,
+                    "reason": reason,
+                    "error": f"{type(exc).__name__}: {exc}"[:16384],
+                },
+            )
+        raise

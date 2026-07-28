@@ -1,0 +1,44 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.55;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 76rem;
+  padding: 1.5rem;
+}
+
+nav {
+  border-bottom: 1px solid #8888;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+  padding-bottom: 0.75rem;
+}
+
+nav a {
+  white-space: nowrap;
+}
+
+section {
+  margin-block: 2rem;
+}
+
+code {
+  background: #8882;
+  border-radius: 0.2rem;
+  padding: 0.1rem 0.25rem;
+}
+
+.warning {
+  border-inline-start: 0.3rem solid #d78300;
+  padding-inline-start: 0.8rem;
+}
+
+.gate {
+  border-inline-start: 0.3rem solid #b43c3c;
+  padding-inline-start: 0.8rem;
+}

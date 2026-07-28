@@ -1,0 +1,21 @@
+Model License Record: SkySeg ONNX weights
+
+Evidence status: PENDING WEIGHT-SPECIFIC CONFIRMATION
+Catalog SPDX expression: MIT (hosting/model-card claim; attribution chain is
+not yet sufficient to prove coverage of the hosted ONNX weight file)
+
+Weight repository: https://huggingface.co/JianyuanWang/skyseg
+Immutable revision: 3ba8c6df1d9ba9ff26f637c7ba9568ac11a9aa7f
+Weight filename: skyseg.onnx
+Claimed original repository:
+https://github.com/xiongzhu666/Sky-Segmentation-and-Post-processing
+Original repository revision: 1f7811b32b64ddc957269defff84bc87a3f0b74f
+Attribution source: Copyright (c) 2021 xiongzhu666 in the captured MIT text.
+
+The host states that the model is available under MIT, but also states that
+the host does not hold copyright to the model or software. The original
+repository contains an MIT license and inference code, but it does not contain
+this exact hosted ONNX file. These facts do not complete an attributable chain
+showing that the MIT grant covers this exact weight file. Engineering 0.1.0 may
+use the catalogued checksum for development, but 1.0.0 remains blocked pending
+weight-specific confirmation.

@@ -1,0 +1,78 @@
+{
+  "catalog_version": "1.0.0",
+  "models": [
+    {
+      "id": "lingbot-map-long",
+      "display_name": "LingBot-Map Long",
+      "role": "reconstruction",
+      "required": true,
+      "architecture": "GCTStream camera-and-depth native-v1",
+      "input_contract": {
+        "image_size": 518,
+        "patch_size": 14,
+        "preprocessing": "canonical-crop-v1"
+      },
+      "serialization": {
+        "format": "pytorch-zip-checkpoint",
+        "load_policy": "torch.load(weights_only=True)",
+        "arbitrary_pickle_allowed": false
+      },
+      "artifact": {
+        "filename": "lingbot-map-long.pt",
+        "length": 4632303465,
+        "sha256": "832bc82cbae0bc9bbe946ef5ee1f7226abd8c0e183ccf8beddbb3d133576f409",
+        "url": "https://huggingface.co/robbyant/lingbot-map/resolve/204754b72bb24f561f8d7e7e1e4e4cd9e809adf9/lingbot-map-long.pt",
+        "source_repository": "https://huggingface.co/robbyant/lingbot-map",
+        "source_revision": "204754b72bb24f561f8d7e7e1e4e4cd9e809adf9"
+      },
+      "license_record": {
+        "status": "pending-weight-specific-confirmation",
+        "spdx_expression": "Apache-2.0",
+        "covers_weights": false,
+        "captured_license_text_path": "model-licenses/LingBot-Map-Apache-2.0.txt",
+        "captured_license_text_sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6",
+        "record_path": "model-licenses/lingbot-map-license-record.txt",
+        "record_sha256": "a1a479318a95463265657517bed62214109b3ec2df0701a0b3f744e0cb5390cd",
+        "copyright_or_attribution_source": "Robbyant Team and authors listed in the immutable model card",
+        "evidence_basis": "Project-level Apache-2.0 statement only; model repository has no LICENSE file or formal license metadata at the pinned revision",
+        "release_gate": "blocked-for-1.0"
+      }
+    },
+    {
+      "id": "skyseg",
+      "display_name": "SkySeg",
+      "role": "auxiliary",
+      "required": false,
+      "architecture": "Sky segmentation ONNX CPU native-v1",
+      "input_contract": {
+        "provider": "CPUExecutionProvider",
+        "mask_rule": "non-sky-confidence-gt-0.1-v1"
+      },
+      "serialization": {
+        "format": "onnx",
+        "load_policy": "onnxruntime.InferenceSession",
+        "arbitrary_pickle_allowed": false
+      },
+      "artifact": {
+        "filename": "skyseg.onnx",
+        "length": 175997079,
+        "sha256": "ab9c34c64c3d821220a2886a4a06da4642ffa14d5b30e8d5339056a089aa1d39",
+        "url": "https://huggingface.co/JianyuanWang/skyseg/resolve/3ba8c6df1d9ba9ff26f637c7ba9568ac11a9aa7f/skyseg.onnx",
+        "source_repository": "https://huggingface.co/JianyuanWang/skyseg",
+        "source_revision": "3ba8c6df1d9ba9ff26f637c7ba9568ac11a9aa7f"
+      },
+      "license_record": {
+        "status": "pending-weight-specific-confirmation",
+        "spdx_expression": "MIT",
+        "covers_weights": false,
+        "captured_license_text_path": "model-licenses/SkySeg-MIT.txt",
+        "captured_license_text_sha256": "d5bf18adf43d9688ed2908a916fe707882acc844cb51a393c91213d87bbf43ca",
+        "record_path": "model-licenses/skyseg-license-record.txt",
+        "record_sha256": "8ebb21dd6b226d95e6a56f571aaea6f21153eed2da41458f4166c4ba028f49a9",
+        "copyright_or_attribution_source": "Copyright (c) 2021 xiongzhu666 at original repository revision 1f7811b32b64ddc957269defff84bc87a3f0b74f",
+        "evidence_basis": "Host claims MIT but disclaims copyright; original repository does not contain the exact hosted ONNX file",
+        "release_gate": "blocked-for-1.0"
+      }
+    }
+  ]
+}

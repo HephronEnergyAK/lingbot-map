@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://lingbot-map.invalid/schemas/job-control/1.0.0",
+  "title": "LingBot Map Job Control 1.0.0", "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "job_id", "job_spec", "runtime_id", "worker", "event_schema_version", "status_schema_version", "cancel_request_path", "target_scene"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"}, "job_id": {"type": "string", "pattern": "^job-[0-9a-f]{32}$"},
+    "job_spec": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"const": "job-spec.json"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+    "runtime_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "worker": {"type": "object", "additionalProperties": false, "required": ["pid", "creation_time", "executable", "executable_sha256", "nonce"], "properties": {
+      "pid": {"type": "integer", "minimum": 1}, "creation_time": {"type": "integer", "minimum": 1}, "executable": {"type": "string", "minLength": 1, "maxLength": 32767},
+      "executable_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
+    }},
+    "event_schema_version": {"const": "1.0.0"}, "status_schema_version": {"const": "1.0.0"}, "cancel_request_path": {"const": "cancel.request"},
+    "target_scene": {"$ref": "job-spec.schema.json#/$defs/target_scene"}
+  }
+}

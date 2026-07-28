@@ -1,0 +1,246 @@
+{
+  "schema_version": "1.0.0",
+  "evidence": "Exact-version PyPI project metadata captured for the frozen 0.1.0 Runtime; application package licenses come from the tagged repository.",
+  "packages": [
+    {
+      "name": "anyio",
+      "version": "4.14.2",
+      "spdx_license_expression": "MIT",
+      "metadata_url": "https://pypi.org/pypi/anyio/4.14.2/json"
+    },
+    {
+      "name": "av",
+      "version": "17.1.0",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/av/17.1.0/json"
+    },
+    {
+      "name": "certifi",
+      "version": "2026.7.22",
+      "spdx_license_expression": "MPL-2.0",
+      "metadata_url": "https://pypi.org/pypi/certifi/2026.7.22/json"
+    },
+    {
+      "name": "click",
+      "version": "8.4.2",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/click/8.4.2/json"
+    },
+    {
+      "name": "colorama",
+      "version": "0.4.6",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/colorama/0.4.6/json"
+    },
+    {
+      "name": "coloredlogs",
+      "version": "15.0.1",
+      "spdx_license_expression": "MIT",
+      "metadata_url": "https://pypi.org/pypi/coloredlogs/15.0.1/json"
+    },
+    {
+      "name": "einops",
+      "version": "0.8.2",
+      "spdx_license_expression": "MIT",
+      "metadata_url": "https://pypi.org/pypi/einops/0.8.2/json"
+    },
+    {
+      "name": "exceptiongroup",
+      "version": "1.3.1",
+      "spdx_license_expression": "MIT",
+      "metadata_url": "https://pypi.org/pypi/exceptiongroup/1.3.1/json"
+    },
+    {
+      "name": "filelock",
+      "version": "3.32.0",
+      "spdx_license_expression": "MIT",
+      "metadata_url": "https://pypi.org/pypi/filelock/3.32.0/json"
+    },
+    {
+      "name": "flatbuffers",
+      "version": "25.12.19",
+      "spdx_license_expression": "Apache-2.0",
+      "metadata_url": "https://pypi.org/pypi/flatbuffers/25.12.19/json"
+    },
+    {
+      "name": "fsspec",
+      "version": "2026.6.0",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/fsspec/2026.6.0/json"
+    },
+    {
+      "name": "h11",
+      "version": "0.16.0",
+      "spdx_license_expression": "MIT",
+      "metadata_url": "https://pypi.org/pypi/h11/0.16.0/json"
+    },
+    {
+      "name": "hf-xet",
+      "version": "1.5.2",
+      "spdx_license_expression": "Apache-2.0",
+      "metadata_url": "https://pypi.org/pypi/hf-xet/1.5.2/json"
+    },
+    {
+      "name": "httpcore",
+      "version": "1.0.9",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/httpcore/1.0.9/json"
+    },
+    {
+      "name": "httpx",
+      "version": "0.28.1",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/httpx/0.28.1/json"
+    },
+    {
+      "name": "huggingface-hub",
+      "version": "1.24.0",
+      "spdx_license_expression": "Apache-2.0",
+      "metadata_url": "https://pypi.org/pypi/huggingface-hub/1.24.0/json"
+    },
+    {
+      "name": "humanfriendly",
+      "version": "10.0",
+      "spdx_license_expression": "MIT",
+      "metadata_url": "https://pypi.org/pypi/humanfriendly/10.0/json"
+    },
+    {
+      "name": "idna",
+      "version": "3.18",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/idna/3.18/json"
+    },
+    {
+      "name": "jinja2",
+      "version": "3.1.6",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/jinja2/3.1.6/json"
+    },
+    {
+      "name": "lingbot-map",
+      "version": "0.1.0",
+      "spdx_license_expression": "Apache-2.0",
+      "metadata_url": "https://github.com/HephronEnergyAK/lingbot-map/blob/v0.1.0/LICENSE.txt"
+    },
+    {
+      "name": "lingbot-map-worker",
+      "version": "0.1.0",
+      "spdx_license_expression": "Apache-2.0",
+      "metadata_url": "https://github.com/HephronEnergyAK/lingbot-map/blob/v0.1.0/worker/pyproject.toml"
+    },
+    {
+      "name": "markupsafe",
+      "version": "3.0.3",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/markupsafe/3.0.3/json"
+    },
+    {
+      "name": "mpmath",
+      "version": "1.3.0",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/mpmath/1.3.0/json"
+    },
+    {
+      "name": "networkx",
+      "version": "3.4.2",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/networkx/3.4.2/json"
+    },
+    {
+      "name": "numpy",
+      "version": "2.2.6",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/numpy/2.2.6/json"
+    },
+    {
+      "name": "nvidia-ml-py",
+      "version": "13.610.43",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/nvidia-ml-py/13.610.43/json"
+    },
+    {
+      "name": "onnxruntime",
+      "version": "1.23.2",
+      "spdx_license_expression": "MIT",
+      "metadata_url": "https://pypi.org/pypi/onnxruntime/1.23.2/json"
+    },
+    {
+      "name": "opencv-python",
+      "version": "5.0.0.93",
+      "spdx_license_expression": "Apache-2.0",
+      "metadata_url": "https://pypi.org/pypi/opencv-python/5.0.0.93/json"
+    },
+    {
+      "name": "packaging",
+      "version": "26.2",
+      "spdx_license_expression": "Apache-2.0 OR BSD-2-Clause",
+      "metadata_url": "https://pypi.org/pypi/packaging/26.2/json"
+    },
+    {
+      "name": "pillow",
+      "version": "12.3.0",
+      "spdx_license_expression": "MIT-CMU",
+      "metadata_url": "https://pypi.org/pypi/pillow/12.3.0/json"
+    },
+    {
+      "name": "protobuf",
+      "version": "7.35.1",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/protobuf/7.35.1/json"
+    },
+    {
+      "name": "pyreadline3",
+      "version": "3.5.6",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/pyreadline3/3.5.6/json"
+    },
+    {
+      "name": "pyyaml",
+      "version": "6.0.3",
+      "spdx_license_expression": "MIT",
+      "metadata_url": "https://pypi.org/pypi/pyyaml/6.0.3/json"
+    },
+    {
+      "name": "safetensors",
+      "version": "0.8.0",
+      "spdx_license_expression": "Apache-2.0",
+      "metadata_url": "https://pypi.org/pypi/safetensors/0.8.0/json"
+    },
+    {
+      "name": "scipy",
+      "version": "1.15.3",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/scipy/1.15.3/json"
+    },
+    {
+      "name": "setuptools",
+      "version": "81.0.0",
+      "spdx_license_expression": "MIT",
+      "metadata_url": "https://pypi.org/pypi/setuptools/81.0.0/json"
+    },
+    {
+      "name": "sympy",
+      "version": "1.14.0",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/sympy/1.14.0/json"
+    },
+    {
+      "name": "torch",
+      "version": "2.11.0+cu130",
+      "spdx_license_expression": "BSD-3-Clause",
+      "metadata_url": "https://pypi.org/pypi/torch/2.11.0/json"
+    },
+    {
+      "name": "tqdm",
+      "version": "4.69.0",
+      "spdx_license_expression": "MPL-2.0 AND MIT",
+      "metadata_url": "https://pypi.org/pypi/tqdm/4.69.0/json"
+    },
+    {
+      "name": "typing-extensions",
+      "version": "4.16.0",
+      "spdx_license_expression": "PSF-2.0",
+      "metadata_url": "https://pypi.org/pypi/typing-extensions/4.16.0/json"
+    }
+  ]
+}

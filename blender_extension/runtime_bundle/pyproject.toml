@@ -1,0 +1,26 @@
+[project]
+name = "lingbot-map-runtime"
+version = "0.1.0"
+requires-python = "==3.10.20"
+dependencies = [
+    "av==17.1.0",
+    "hf-xet==1.5.2",
+    "lingbot-map-worker==0.1.0",
+    "lingbot-map==0.1.0",
+    "nvidia-ml-py==13.610.43",
+    "onnxruntime==1.23.2",
+    "torch==2.11.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+lingbot-map-worker = { path = "wheels/lingbot_map_worker-0.1.0-py3-none-any.whl" }
+lingbot-map = { path = "wheels/lingbot_map-0.1.0-py3-none-any.whl" }
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

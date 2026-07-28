@@ -1,0 +1,59 @@
+{
+  "catalog_version": "1.0.0",
+  "contracts": [
+    {
+      "id": "runtime-identity",
+      "version": "1.0.0",
+      "path": "runtime-identity.schema.json",
+      "sha256": "a1b23a25008d33d1a485ce130321080b4463d6113add0342b8fe538f7d51b219"
+    },
+    {
+      "id": "model-catalog",
+      "version": "1.0.0",
+      "path": "model-catalog.schema.json",
+      "sha256": "33c7633cf300bbece893fae137135b987e07afb3c72ef7bfc2e5ff262d3a9b26"
+    },
+    {
+      "id": "job-spec",
+      "version": "1.0.0",
+      "path": "job-spec.schema.json",
+      "sha256": "cf91ecfbc7e951052aa094069ea0a0e44f24229d5ffec6f0a4346e40fa42bfbf"
+    },
+    {
+      "id": "reconstruction-result",
+      "version": "1.0.0",
+      "path": "reconstruction-result.schema.json",
+      "sha256": "44bf0f4a0b8540889e18ea70d977324229d935e53663685b445ceae399c7fb6b"
+    },
+    {
+      "id": "dense-predictions",
+      "version": "1.0.0",
+      "path": "dense-predictions.schema.json",
+      "sha256": "fa5f19d12eea9dfafdfd581df6ab2b9b6c8a6bf4bedc4fca3b4fb50b62c24e59"
+    },
+    {
+      "id": "preflight-result",
+      "version": "1.0.0",
+      "path": "preflight-result.schema.json",
+      "sha256": "c859a16cedd5605f14a878e355117576cd9fb9ca31a06866f1e6ba992fa21b8c"
+    },
+    {
+      "id": "job-control",
+      "version": "1.0.0",
+      "path": "job-control.schema.json",
+      "sha256": "4ff593765e01c16891953f0185f79652fee98c026ee7036d91caa570d1575bbb"
+    },
+    {
+      "id": "job-event",
+      "version": "1.0.0",
+      "path": "job-event.schema.json",
+      "sha256": "07e18e9e31a7eb3d10d372d70e69f24649c50d563e0529912c23556ef6185cb5"
+    },
+    {
+      "id": "job-status",
+      "version": "1.0.0",
+      "path": "job-status.schema.json",
+      "sha256": "50d9fa361a4b5260299f9f17bf474edd30f3bed9697ad1ff63f3ed694694d4d9"
+    }
+  ]
+}

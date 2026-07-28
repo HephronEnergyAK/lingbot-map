@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0.0",
+  "fixture_id": "real-kitti-odometry-00-windowed-3001",
+  "status": "ready",
+  "source_archive": {
+    "filename": "data_odometry_gray.zip",
+    "url": "https://s3.eu-central-1.amazonaws.com/avg-kitti/data_odometry_gray.zip",
+    "bytes": 23166524501,
+    "etag": "\"1129e5e7249778de3bc174315455a681-2762\"",
+    "last_modified": "Fri, 11 May 2018 16:05:50 GMT",
+    "sha256": "94963792b9c48e37191583ba44608304713ae018a38735133f1435665f3ada12"
+  },
+  "selection": {
+    "sequence": "00",
+    "camera": "image_0",
+    "source_frame_range": [0, 3000],
+    "source_files": 3001,
+    "source_dimensions": [1241, 376],
+    "output_dimensions": [518, 158],
+    "fps": 10,
+    "temporal_sampling": false
+  },
+  "license": {
+    "spdx": "CC-BY-NC-SA-3.0",
+    "evidence_path": "release_corpus/licenses/KITTI-CC-BY-NC-SA-3.0.md",
+    "evidence_sha256": "52ec921de2a59b2028215d5cb10d6fcac584c7fca1b132989def0f886aeda871",
+    "official_evidence_url": "https://www.cvlibs.net/datasets/kitti/",
+    "license_deed_url": "https://creativecommons.org/licenses/by-nc-sa/3.0/",
+    "attribution": "Andreas Geiger, Philip Lenz, Christoph Stiller, and Raquel Urtasun; KITTI Vision Benchmark Suite",
+    "constraints": [
+      "attribution-required",
+      "non-commercial-only",
+      "share-alike-3.0-required-for-derivatives"
+    ]
+  },
+  "observed_evidence": {
+    "ordered_member_sha256_manifest": "a7086a49a8238c2ba5007505489430a10d282d316186771059075699444f49c0",
+    "transformed_rgb_sha256": "fc6b831272efa0f85e4f5a6557e80f34ef9ac5c8e4e0763da78fb9948ff45077"
+  },
+  "expected_output": {
+    "id": "real-kitti-odometry-00-windowed-3001",
+    "kind": "real-windowed-official-benchmark",
+    "file": "real-kitti-odometry-00-windowed-3001.mp4",
+    "bytes": 142841512,
+    "sha256": "8052a7b8f9634b9a983260e046d3f000a22955f1c2d7f0232e6566716b7187ef",
+    "frame_count": 3001,
+    "mode": "windowed",
+    "keyframe_interval": 1,
+    "video_codec": "h264",
+    "coded_dimensions": [518, 158],
+    "displayed_dimensions": [518, 158],
+    "display_transform": "identity",
+    "color_standard": "bt709",
+    "color_range": "limited",
+    "variable_frame_rate": false,
+    "timestamps_sha256": "d78681c992c0532e835b90ec98a36b7343e5b335a0fa18b2ded003df4e83b9aa",
+    "decoded_rgb_sha256": "814b1daf872d0a1540ccf7d78a85c0dfab14cc21981d7c98c6e9415713375e37",
+    "official_dataset": "KITTI Visual Odometry / SLAM Evaluation 2012",
+    "sequence": "00",
+    "camera": "image_0",
+    "source_frame_range": [0, 3000],
+    "source_archive_sha256": "94963792b9c48e37191583ba44608304713ae018a38735133f1435665f3ada12",
+    "source_files": 3001,
+    "source_manifest_sha256": "a7086a49a8238c2ba5007505489430a10d282d316186771059075699444f49c0",
+    "transformed_rgb_sha256": "fc6b831272efa0f85e4f5a6557e80f34ef9ac5c8e4e0763da78fb9948ff45077",
+    "license_spdx": "CC-BY-NC-SA-3.0"
+  }
+}

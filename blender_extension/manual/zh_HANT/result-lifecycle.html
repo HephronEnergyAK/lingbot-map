@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-Hant" data-locale="zh_HANT">
+<head><meta charset="utf-8"><title>Results 與專案垃圾桶 — LingBot Map Reconstruction</title><link rel="stylesheet" href="../style.css"></head>
+<body data-chapter-id="result-lifecycle">
+<nav><a href="index.html">概覽</a><a href="installation-setup.html">安裝與設定</a><a href="capture.html">擷取</a><a href="profiles.html">設定檔</a><a href="reconstruction.html">重建</a><a href="import-visualization.html">匯入與顯示</a><a href="result-lifecycle.html">Results 與垃圾桶</a><a href="privacy-diagnostics.html">隱私與診斷</a><a href="model-licensing.html">模型授權</a><a href="errors-troubleshooting.html">錯誤</a></nav>
+<main>
+<section id="results" data-section-id="results"><h1>Results</h1><p>每個成功工作都會在同層專案 Result Root 下發布一個不可變且具版本的 Result。重複工作會建立額外 Results；絕不取代先前的 Result 或已匯入 Collection。顯示名稱可自由編輯且不建立所有權。只有完整且相互一致的擴充功能 metadata 控制 idempotency 與生命週期權限。</p><p>「移除版本」只會在明確檢查後刪除唯一擁有的 Blender datablocks；共享資料與磁碟 Result 會保留。解除管理的內容成為使用者所有，且絕不因名稱或結構被重新納管。</p></section>
+<section id="dense-predictions" data-section-id="dense-predictions"><h2>Dense Predictions</h2><p>選用 Dense Predictions 包含最終對齊深度與原始信心度 chunks。預設不保留，啟用後會使設定檔成為自訂。移除 Dense Predictions 會驗證完整元件，並只將 <code>dense/</code> 移至專案垃圾桶；核心 Result 與已匯入內容仍可使用。</p></section>
+<section id="project-trash" data-section-id="project-trash"><h2>專案垃圾桶</h2><p>將自有 Result、Dense 元件或診斷移至垃圾桶，是明確、可復原且原子的操作。復原需要確切識別、原始所有權及不存在的目的地，絕不覆寫。永久刪除會清查直接且一般的內容，要求輸入 <code>DELETE</code>，每次處理一個檔案，並在中斷時留下可檢查的 partial-delete 狀態。</p><p>垃圾桶沒有自動到期。解除安裝絕不刪除 Projects、Results、診斷或垃圾桶。</p></section>
+<section id="external-results" data-section-id="external-results"><h2>外部 Results 與 Save As</h2><p>Save As 絕不遷移專案資料。參照舊專案的 Collections 在新檔案中會成為 External 唯讀參照。外部 Results 不提供移動、復原、Dense 移除或永久刪除操作。重新連結需要與紀錄完全相同的 Result ID 及 manifest checksum。</p></section>
+</main></body></html>

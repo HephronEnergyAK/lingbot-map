@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lingbot-map.invalid/schemas/dense-predictions/1.0.0",
+  "title": "LingBot Map Dense Predictions 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "component", "completion_state", "frame_count", "model_grid", "chunk_frame_limit", "signals", "provenance"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "component": {"const": "dense_predictions"},
+    "completion_state": {"const": "complete"},
+    "frame_count": {"type": "integer", "minimum": 1},
+    "model_grid": {"type": "object", "additionalProperties": false, "required": ["height", "width"], "properties": {"height": {"type": "integer", "minimum": 1}, "width": {"type": "integer", "minimum": 1}}},
+    "chunk_frame_limit": {"const": 64},
+    "signals": {"type": "object", "additionalProperties": false, "required": ["depth", "depth_confidence"], "properties": {"depth": {"$ref": "#/$defs/signal"}, "depth_confidence": {"$ref": "#/$defs/signal"}}},
+    "provenance": {"type": "object", "additionalProperties": false, "required": ["job_id", "source_sha256", "model_sha256", "profile_settings_sha256", "preprocessing_rule_version", "alignment_rule_version"], "properties": {
+      "job_id": {"type": "string", "pattern": "^job-[0-9a-f]{32}$"}, "source_sha256": {"$ref": "#/$defs/sha256"}, "model_sha256": {"$ref": "#/$defs/sha256"}, "profile_settings_sha256": {"$ref": "#/$defs/sha256"}, "preprocessing_rule_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"}, "alignment_rule_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"}
+    }}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "signal": {"type": "object", "additionalProperties": false, "required": ["dtype", "shape", "chunks"], "properties": {"dtype": {"const": "<f4"}, "shape": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "integer", "minimum": 1}}, "chunks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/chunk"}}}},
+    "chunk": {"type": "object", "additionalProperties": false, "required": ["path", "dtype", "shape", "frame_start", "frame_count", "byte_length", "sha256"], "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 32767, "pattern": "^(depth|depth_confidence)/[0-9]{8}-[0-9]{8}\\.npy$"}, "dtype": {"const": "<f4"}, "shape": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "integer", "minimum": 1}}, "frame_start": {"type": "integer", "minimum": 0}, "frame_count": {"type": "integer", "minimum": 1, "maximum": 64}, "byte_length": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/sha256"}}}
+  }
+}

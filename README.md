@@ -15,6 +15,7 @@ Robbyant Team
 [![HuggingFace](https://img.shields.io/static/v1?label=%F0%9F%A4%97%20Model&message=HuggingFace&color=orange)](https://huggingface.co/robbyant/lingbot-map)
 [![ModelScope](https://img.shields.io/static/v1?label=%F0%9F%A4%96%20Model&message=ModelScope&color=purple)](https://www.modelscope.cn/models/Robbyant/lingbot-map)
 [![License](https://img.shields.io/badge/License-Apache--2.0-green)](LICENSE.txt)
+[![Blender Extension](https://img.shields.io/badge/Blender%20Extension-v0.1.0-blue)](https://github.com/HephronEnergyAK/lingbot-map/releases/tag/v0.1.0)
 
 </div>
 
@@ -32,14 +33,78 @@ LingBot-Map has focused on:
 
 ---
 
+## 🧩 Blender Extension 0.1.0
+
+[`LingBot Map Reconstruction 0.1.0`](https://github.com/HephronEnergyAK/lingbot-map/releases/tag/v0.1.0)
+is an installable Blender engineering release. It turns one local MP4 or MOV
+continuous take into a native colored Point Cloud, animated Reconstruction
+Camera, and trajectory while running neural inference in a separate finite
+Worker process instead of Blender's Python process.
+
+### Qualified release scope
+
+- Windows 11 x64
+- Blender 5.2 LTS
+- NVIDIA RTX 5090 Blackwell 32 GB reference
+- Draft, Balanced, and High Profiles on the pinned Runtime stack
+
+This qualification does not claim general NVIDIA, Ada, `1.0.0`, or official
+Blender Extensions platform support. Every Profile must pass the capability
+test on the selected physical GPU before it can be used. Ada 16 GB-or-more
+qualification and attributable weight-specific model-license evidence remain
+mandatory `1.0.0` gates.
+
+### Install the Extension
+
+1. Download the
+   [`0.1.0` Extension ZIP](https://github.com/HephronEnergyAK/lingbot-map/releases/download/v0.1.0/lingbot_map_reconstruction-0.1.0.zip)
+   and its
+   [SHA-256 companion](https://github.com/HephronEnergyAK/lingbot-map/releases/download/v0.1.0/lingbot_map_reconstruction-0.1.0.zip.sha256).
+2. Verify the ZIP before installation:
+
+   ```powershell
+   Get-FileHash .\lingbot_map_reconstruction-0.1.0.zip -Algorithm SHA256
+   ```
+
+   Expected SHA-256:
+   `c9af32c7ed3e002e21087a2376eeaca661fba45eb9307062ecdbacf0bd4ddff6`.
+3. In Blender's Extension manager, choose **Install from Disk** and select the
+   versioned ZIP. Do not unpack it first.
+4. Open the **LingBot Map** sidebar and explicitly run **Setup Worker Runtime**,
+   acquire or import the exact catalogued models, then run
+   **Test GPU Profiles**.
+5. Save the target `.blend`, choose one supported MP4 or MOV Capture Source,
+   run Preflight, select a qualified Profile, and start Reconstruction.
+
+Setup downloads never begin merely by enabling the Extension. Offline Setup
+uses only already verified cache content and never falls back to the network.
+Capture media remains local and is not copied into Results or uploaded.
+
+Release verification is available through the
+[clean-tag CI run](https://github.com/HephronEnergyAK/lingbot-map/actions/runs/30336037482),
+[SPDX 2.3 SBOM](https://github.com/HephronEnergyAK/lingbot-map/releases/download/v0.1.0/lingbot_map_reconstruction-0.1.0.sbom.spdx.json),
+and
+[build provenance](https://github.com/HephronEnergyAK/lingbot-map/releases/download/v0.1.0/lingbot_map_reconstruction-0.1.0.provenance.json).
+The complete English and Traditional Chinese offline manuals ship in the ZIP;
+repository copies begin at
+[`blender_extension/manual/en_US/index.html`](blender_extension/manual/en_US/index.html)
+and
+[`blender_extension/manual/zh_HANT/index.html`](blender_extension/manual/zh_HANT/index.html).
+
+> The Conda and `pip install -e .` instructions below install the original
+> research/demo package. They do not install the Blender Extension.
+
+---
+
 ## 📑 Table of Contents
 
 <details>
 <summary>Click to expand</summary>
 
+- [🧩 Blender Extension 0.1.0](#-blender-extension-010)
 - [📰 News](#-news)
 - [📋 TODO](#-todo)
-- [⚙️ Installation](#️-installation)
+- [⚙️ Research Package Installation](#️-installation)
 - [📦 Model Download](#-model-download)
 - [🚀 Quick Start](#-quick-start)
 - [🎬 Interactive Demo (`demo.py`)](#-interactive-demo-demopy)
@@ -60,6 +125,10 @@ LingBot-Map has focused on:
 
 ## 📰 News
 
+- **2026-07-28** — 🧩 Published the immutable
+  [`LingBot Map Reconstruction 0.1.0` Blender engineering release](https://github.com/HephronEnergyAK/lingbot-map/releases/tag/v0.1.0)
+  for the qualified Windows 11 x64, Blender 5.2 LTS, and RTX 5090 Blackwell
+  reference scope, with SHA-256, SPDX SBOM, provenance, and attestations.
 - **2026-06-28** — Fixed an SDPA KV cache bug. **The SDPA backend now performs better on long sequences**. We still recommend the FlashInfer backend for the best performance.
 - **2026-05-25** — 📊 **Evaluation benchmark released**. We released the evaluation scripts for KITTI and Oxford Spires — see [benchmark/](benchmark/) for the pipeline, and run [`preprocess/oxford.py`](preprocess/oxford.py) to prepare Oxford Spires data before evaluation.
 - **2026-04-29** — 📹 **Long-video demo released**. We released a very-long-video example (~25 000 frames, 13-minute indoor walkthrough) rendered with the offline pipeline — see [Worked Example](#worked-example--long-indoor-walkthrough-25-000-frames-13-minutes) for the command, flag rationale, and rendered output.
@@ -89,6 +158,10 @@ LingBot-Map has focused on:
 ---
 
 ## ⚙️ Installation
+
+This section installs the original Python research and demo package. To install
+the Blender Extension, follow
+[Blender Extension 0.1.0](#-blender-extension-010) above.
 
 **1. Create conda environment**
 
@@ -562,7 +635,12 @@ For a given output name (e.g. `<scene>` or `<video_name>`):
 
 ## 📜 License
 
-This project is released under the Apache License 2.0. See [LICENSE](LICENSE.txt) file for details.
+The original LingBot-Map research core is released under Apache-2.0; see
+[LICENSE](LICENSE.txt). The Blender-facing Extension is distributed under
+GPL-3.0-or-later, while its external Worker/core wheel boundary remains
+Apache-2.0. The packaged Release contains the complete license inventory,
+dependency notices, and model-license evidence status. A surrounding source
+repository license is not assumed to cover a model weight file.
 
 ## 📖 Citation
 

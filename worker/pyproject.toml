@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.46.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lingbot-map-worker"
+version = "0.1.0"
+description = "Headless Reconstruction Worker for LingBot Map Reconstruction"
+requires-python = "==3.10.20"
+license = "Apache-2.0"
+dependencies = [
+    "av==17.1.0",
+    "lingbot-map==0.1.0",
+    "nvidia-ml-py==13.610.43",
+    "onnxruntime==1.23.2",
+    "torch==2.11.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lingbot_map_worker*"]
+
+[tool.setuptools.package-data]
+lingbot_map_worker = ["NOTICE.txt"]

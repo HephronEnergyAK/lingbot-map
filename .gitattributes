@@ -1,0 +1,17 @@
+# Byte-hashed machine contracts and evidence must survive a clean Windows checkout.
+.gitattributes text eol=lf
+schemas/*.json text eol=lf
+model-catalog.json text eol=lf
+model-licenses/*.txt text eol=lf
+blender_extension/runtime_bundle/*.json text eol=lf
+blender_extension/runtime_bundle/schemas/*.json text eol=lf
+blender_extension/runtime_bundle/model-licenses/*.txt text eol=lf
+blender_extension/runtime_bundle/wheels/*.whl binary
+release/*.json text eol=lf
+release_corpus/*.json text eol=lf
+release_corpus/licenses/*.md text eol=lf
+
+# The checked-in Apache evidence hashes intentionally cover CRLF bytes.
+LICENSE.txt text eol=crlf
+model-licenses/LingBot-Map-Apache-2.0.txt text eol=crlf
+blender_extension/runtime_bundle/model-licenses/LingBot-Map-Apache-2.0.txt text eol=crlf

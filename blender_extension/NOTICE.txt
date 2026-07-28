@@ -1,0 +1,14 @@
+LingBot Map Reconstruction
+Copyright 2026 LingBot Map Contributors
+
+The Blender-facing Extension files are distributed under
+GPL-3.0-or-later. The bundled Runtime inputs are a separate package boundary:
+the LingBot Map Worker and LingBot-Map model core wheels are distributed under
+Apache-2.0 and execute only in the external Worker Runtime. Blender never
+imports either wheel.
+
+Runtime dependency license records are packaged in
+release/dependency-licenses.json and the generated Runtime dependency notice.
+Catalogued model license evidence is packaged under
+runtime_bundle/model-licenses/. Unresolved weight-specific evidence remains a
+blocking gate for version 1.0.0 and official-platform claims.

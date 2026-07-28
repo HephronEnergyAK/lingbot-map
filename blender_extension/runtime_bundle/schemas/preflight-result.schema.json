@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lingbot-map.invalid/schemas/preflight-result/1.0.0",
+  "title": "LingBot Map Capture Source Preflight Result 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job_id", "source", "decoder", "video", "timing", "audio_streams", "canonical_rgb", "timestamps"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "job_id": {"type": "string", "pattern": "^job-[0-9a-f]{32}$"},
+    "source": {"$ref": "#/$defs/source"},
+    "decoder": {"$ref": "#/$defs/decoder"},
+    "video": {"$ref": "#/$defs/video"},
+    "timing": {"$ref": "#/$defs/timing"},
+    "audio_streams": {"type": "array", "items": {"$ref": "#/$defs/audio"}},
+    "canonical_rgb": {"$ref": "#/$defs/blob"},
+    "timestamps": {"$ref": "#/$defs/blob"}
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["draft_path", "absolute_path", "scene_relative_path", "size_bytes", "modification_time_ns", "sha256", "container_format"],
+      "properties": {
+        "draft_path": {"type": "string"}, "absolute_path": {"type": "string"},
+        "scene_relative_path": {"type": ["string", "null"]},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "modification_time_ns": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha"}, "container_format": {"type": "string"}
+      }
+    },
+    "decoder": {
+      "type": "object", "additionalProperties": false,
+      "required": ["adapter", "pyav_version", "color_conversion", "output_color", "ffmpeg_libraries"],
+      "properties": {
+        "adapter": {"const": "pyav"}, "pyav_version": {"const": "17.1.0"},
+        "color_conversion": {"const": "pyav-video-frame-to-ndarray-rgb24"},
+        "output_color": {"const": "srgb-8-bit"},
+        "ffmpeg_libraries": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "integer"}}}
+      }
+    },
+    "video": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stream_index", "codec", "coded_width", "coded_height", "displayed_width", "displayed_height", "pixel_format", "display_transform", "color"],
+      "properties": {
+        "stream_index": {"type": "integer", "minimum": 0}, "codec": {"type": "string"},
+        "coded_width": {"type": "integer", "minimum": 1}, "coded_height": {"type": "integer", "minimum": 1},
+        "displayed_width": {"type": "integer", "minimum": 1}, "displayed_height": {"type": "integer", "minimum": 1},
+        "pixel_format": {"type": "string"},
+        "display_transform": {"type": "string", "enum": ["identity", "rotate_90_ccw", "rotate_180", "rotate_270_ccw", "reflect_x", "reflect_y", "reflect_main_diagonal", "reflect_anti_diagonal"]},
+        "color": {"type": "object", "additionalProperties": false, "required": ["standard", "range", "primaries", "transfer", "space", "range_code"], "properties": {
+          "standard": {"enum": ["bt601", "bt709"]}, "range": {"enum": ["limited", "full"]},
+          "primaries": {"type": "integer"}, "transfer": {"type": "integer"}, "space": {"type": "integer"}, "range_code": {"type": "integer"}
+        }}
+      }
+    },
+    "timing": {
+      "type": "object", "additionalProperties": false,
+      "required": ["frame_count", "stream_time_base", "nominal_frame_rate", "variable_frame_rate"],
+      "properties": {
+        "frame_count": {"type": "integer", "minimum": 8}, "stream_time_base": {"type": "array", "prefixItems": [{"type": "integer"}, {"type": "integer", "minimum": 1}], "items": false},
+        "nominal_frame_rate": {"type": ["string", "null"]}, "variable_frame_rate": {"type": "boolean"}
+      }
+    },
+    "audio": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stream_index", "codec", "sample_rate", "channels"],
+      "properties": {"stream_index": {"type": "integer"}, "codec": {"type": "string"}, "sample_rate": {"type": "integer"}, "channels": {"type": "integer"}}
+    },
+    "blob": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "length"],
+      "properties": {"path": {"type": ["string", "null"]}, "sha256": {"$ref": "#/$defs/sha"}, "length": {"type": "integer", "minimum": 0}}
+    }
+  }
+}

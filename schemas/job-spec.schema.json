@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lingbot-map.invalid/schemas/job-spec/1.0.0",
+  "title": "LingBot Map JobSpec 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job_id", "target_scene", "timeline_start", "project_root"],
+  "oneOf": [
+    {"required": ["fixture"]},
+    {"required": ["capture_source"]},
+    {"required": ["result_fixture"]},
+    {"required": ["reconstruction"]}
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "job_id": {"type": "string", "pattern": "^job-[0-9a-f]{32}$"},
+    "target_scene": {"$ref": "#/$defs/target_scene"},
+    "timeline_start": {"type": "integer", "minimum": -1048574, "maximum": 1048574},
+    "project_root": {"type": "string", "minLength": 1, "maxLength": 32767},
+    "fixture": {"$ref": "#/$defs/fixture"},
+    "capture_source": {"$ref": "#/$defs/capture_source"},
+    "result_fixture": {"$ref": "#/$defs/result_fixture"},
+    "reconstruction": {"$ref": "#/$defs/reconstruction"}
+  },
+  "$defs": {
+    "target_scene": {
+      "type": "object", "additionalProperties": false,
+      "required": ["blend_path", "scene_uuid", "scene_name"],
+      "properties": {
+        "blend_path": {"type": "string", "minLength": 1, "maxLength": 32767},
+        "scene_uuid": {"type": "string", "format": "uuid"},
+        "scene_name": {"type": "string", "minLength": 1, "maxLength": 1024}
+      }
+    },
+    "fixture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["steps", "step_delay_seconds", "ignore_cancel", "heartbeat_interval_seconds", "freeze_heartbeat_after_sequence"],
+      "properties": {
+        "steps": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "step_delay_seconds": {"type": "number", "minimum": 0, "maximum": 60},
+        "ignore_cancel": {"type": "boolean"},
+        "heartbeat_interval_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 5},
+        "freeze_heartbeat_after_sequence": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "capture_source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["draft_path", "absolute_path", "scene_relative_path", "size_bytes", "modification_time_ns"],
+      "properties": {
+        "draft_path": {"type": "string", "minLength": 1, "maxLength": 32767},
+        "absolute_path": {"type": "string", "minLength": 1, "maxLength": 32767},
+        "scene_relative_path": {"type": ["string", "null"], "minLength": 3, "maxLength": 32767, "pattern": "^//"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "modification_time_ns": {"type": "integer", "minimum": 1}
+      }
+    },
+    "result_fixture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["absolute_path", "scene_relative_path", "size_bytes", "modification_time_ns", "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget", "initial_voxel_edge_length", "heartbeat_interval_seconds"],
+      "properties": {
+        "absolute_path": {"type": "string", "minLength": 1, "maxLength": 32767},
+        "scene_relative_path": {"type": ["string", "null"], "minLength": 3, "maxLength": 32767, "pattern": "^//"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "modification_time_ns": {"type": "integer", "minimum": 1},
+        "confidence_cutoff_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "depth_cutoff_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "import_point_budget": {"type": "integer", "minimum": 1, "maximum": 50000000},
+        "initial_voxel_edge_length": {"type": "number", "exclusiveMinimum": 0},
+        "heartbeat_interval_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 5}
+      }
+    },
+    "reconstruction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["managed_root", "worker_lock_sha256", "source", "preflight", "profile", "gpu", "model", "heartbeat_interval_seconds", "initial_voxel_edge_length"],
+      "properties": {
+        "managed_root": {"type": "string", "minLength": 1, "maxLength": 32767},
+        "worker_lock_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source": {"type": "object", "additionalProperties": false, "required": ["absolute_path", "scene_relative_path", "size_bytes", "modification_time_ns", "sha256"], "properties": {
+          "absolute_path": {"type": "string", "minLength": 1, "maxLength": 32767}, "scene_relative_path": {"type": ["string", "null"], "pattern": "^//"}, "size_bytes": {"type": "integer", "minimum": 1}, "modification_time_ns": {"type": "integer", "minimum": 1}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }},
+        "preflight": {"type": "object", "additionalProperties": false, "required": ["frame_count", "video_stream_index", "displayed_width", "displayed_height", "display_transform", "color_standard", "color_range", "variable_frame_rate"], "properties": {
+          "frame_count": {"type": "integer", "minimum": 8}, "video_stream_index": {"type": "integer", "minimum": 0}, "displayed_width": {"type": "integer", "minimum": 1}, "displayed_height": {"type": "integer", "minimum": 1}, "display_transform": {"type": "string", "minLength": 1}, "color_standard": {"enum": ["bt601", "bt709"]}, "color_range": {"enum": ["limited", "full"]}, "variable_frame_rate": {"type": "boolean"}
+        }},
+        "profile": {"type": "object", "additionalProperties": false, "required": ["name", "camera_iterations", "confidence_cutoff_percent", "depth_cutoff_percent", "import_point_budget", "point_budget_confirmed"], "properties": {
+          "name": {"enum": ["Draft", "Balanced", "High", "Custom"]}, "camera_iterations": {"type": "integer", "minimum": 1, "maximum": 16}, "confidence_cutoff_percent": {"type": "number", "minimum": 0, "maximum": 100}, "depth_cutoff_percent": {"type": "number", "minimum": 0, "maximum": 100}, "import_point_budget": {"type": "integer", "minimum": 1, "maximum": 50000000}, "point_budget_confirmed": {"type": "boolean"}, "retain_dense_predictions": {"type": "boolean", "default": false}
+        }},
+        "gpu": {"type": "object", "additionalProperties": false, "required": ["uuid", "name", "total_memory", "driver_version", "compute_capability", "capability_profile_name", "capability_profile_settings_sha256"], "properties": {
+          "uuid": {"type": "string", "pattern": "^(GPU|MIG)-[A-Za-z0-9-]{8,90}$"}, "name": {"type": "string", "minLength": 1}, "total_memory": {"type": "integer", "minimum": 1}, "driver_version": {"type": "string", "minLength": 1}, "compute_capability": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 0}, {"type": "integer", "minimum": 0}], "items": false}, "capability_profile_name": {"enum": ["Draft", "Balanced", "High"]}, "capability_profile_settings_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }},
+        "model": {"type": "object", "additionalProperties": false, "required": ["catalog_version", "id", "path", "sha256"], "properties": {"catalog_version": {"type": "string", "minLength": 1}, "id": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1, "maxLength": 32767}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+        "sky_mask": {
+          "oneOf": [
+            {"type": "object", "additionalProperties": false, "required": ["enabled"], "properties": {"enabled": {"const": false}}},
+            {"type": "object", "additionalProperties": false, "required": ["enabled", "model"], "properties": {
+              "enabled": {"const": true},
+              "model": {"type": "object", "additionalProperties": false, "required": ["catalog_version", "id", "path", "sha256"], "properties": {
+                "catalog_version": {"type": "string", "minLength": 1}, "id": {"const": "skyseg"},
+                "path": {"type": "string", "minLength": 1, "maxLength": 32767},
+                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }}
+            }}
+          ]
+        },
+        "heartbeat_interval_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 5},
+        "initial_voxel_edge_length": {"type": "number", "exclusiveMinimum": 0}
+      }
+    }
+  }
+}

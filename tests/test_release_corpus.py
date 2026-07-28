@@ -1,0 +1,393 @@
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+try:
+    import numpy as np
+except ModuleNotFoundError:
+    np = None
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+if np is not None:
+    from scripts import build_release_corpus
+    from scripts.calibrate_neural_oracle import (
+        CalibrationError,
+        _create_pipeline,
+        _prepare_output,
+    )
+    from lingbot_map_worker.long_pipeline import (
+        WindowedReconstructionPipeline,
+    )
+    from lingbot_map_worker.short_pipeline import (
+        ShortReconstructionPipeline,
+    )
+    from scripts.validate_neural_oracle import validate_neural_output
+    from scripts.validate_release_corpus import (
+        CorpusValidationError,
+        _validate_generated,
+        _validate_neural_oracles,
+        load_json,
+        validate,
+    )
+
+
+@unittest.skipIf(np is None, "Release corpus requires the pinned Worker Runtime")
+class ReleaseCorpusTests(unittest.TestCase):
+    def test_neural_calibration_refuses_nonempty_output_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "existing"
+            output.mkdir()
+            sentinel = output / "preserve.txt"
+            sentinel.write_text("user data", encoding="utf-8")
+            with self.assertRaisesRegex(CalibrationError, "new or empty"):
+                _prepare_output(output)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "user data")
+
+    def test_neural_calibration_selects_pipeline_at_exact_boundary(self):
+        short_factory = lambda *_args: None
+        window_factory = lambda *_args: None
+        self.assertIsInstance(
+            _create_pipeline(3000, short_factory, window_factory),
+            ShortReconstructionPipeline,
+        )
+        self.assertIsInstance(
+            _create_pipeline(3001, short_factory, window_factory),
+            WindowedReconstructionPipeline,
+        )
+
+    def test_engineering_release_defers_ada_until_stable_qualification(self):
+        result = validate()
+        self.assertEqual(result["structural_validation"], "passed")
+        self.assertTrue(result["release_ready"])
+        self.assertTrue(result["engineering_release_ready"])
+        self.assertFalse(result["stable_release_ready"])
+        self.assertEqual(result["blockers"], [])
+        self.assertEqual(
+            [item["id"] for item in result["deferred_gates"]],
+            ["ada-release-suite"],
+        )
+        self.assertTrue(validate(release=True)["release_ready"])
+        with self.assertRaisesRegex(
+            CorpusValidationError,
+            "stable release gates remain blocked: ada-release-suite$",
+        ):
+            validate(stable_release=True)
+
+    def test_official_kitti_windowed_fixture_resolves_only_the_media_rights_gate(self):
+        manifest = load_json(ROOT / "release_corpus" / "manifest.json")
+        fixtures = {
+            item["id"]: item for item in manifest["real_captures"]
+        }
+        fixture = fixtures["real-kitti-odometry-00-windowed-3001"]
+        self.assertEqual(fixture["status"], "ready-external")
+        self.assertEqual(fixture["classification"], "windowed")
+        self.assertEqual(fixture["presentation_frames"], 3001)
+        self.assertEqual(
+            fixture["provenance"]["official_dataset"],
+            "KITTI Visual Odometry / SLAM Evaluation 2012",
+        )
+        self.assertEqual(fixture["provenance"]["sequence"], "00")
+        self.assertEqual(fixture["provenance"]["camera"], "image_0")
+        self.assertEqual(
+            fixture["provenance"]["source_frame_range"], [0, 3000]
+        )
+        self.assertEqual(
+            fixture["license"]["spdx"], "CC-BY-NC-SA-3.0"
+        )
+        self.assertFalse(fixture["storage"]["checked_in"])
+        self.assertEqual(
+            fixture["storage"]["location"],
+            "caller-supplied release-suite scratch storage",
+        )
+
+        result = validate()
+        self.assertEqual(result["blockers"], [])
+        self.assertEqual(
+            [item["id"] for item in result["deferred_gates"]],
+            ["ada-release-suite"],
+        )
+        self.assertTrue(validate(release=True)["release_ready"])
+
+    def test_small_media_generation_is_byte_deterministic_and_golden(self):
+        goldens = load_json(ROOT / "release_corpus" / "generated-goldens.json")
+        expected = {
+            item["id"]: item for item in goldens["fixtures"]
+        }["synthetic-boundary-8"]
+        records = []
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            for attempt in range(2):
+                output = base / f"attempt-{attempt}"
+                document = build_release_corpus.build(
+                    output,
+                    include_stress=False,
+                    include_real=False,
+                    only=frozenset({"synthetic-boundary-8"}),
+                )
+                record = document["fixtures"][0]
+                for key, value in expected.items():
+                    self.assertEqual(record.get(key), value, key)
+                records.append(record)
+            self.assertEqual(records[0], records[1])
+            with self.assertRaisesRegex(RuntimeError, "must be empty"):
+                build_release_corpus.build(
+                    base / "attempt-0",
+                    include_stress=False,
+                    include_real=False,
+                )
+
+    def test_generated_manifest_requires_complete_ordinary_corpus(self):
+        goldens = load_json(ROOT / "release_corpus" / "generated-goldens.json")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "only-one"
+            build_release_corpus.build(
+                output,
+                include_stress=False,
+                include_real=False,
+                only=frozenset({"synthetic-boundary-8"}),
+            )
+            with self.assertRaisesRegex(
+                CorpusValidationError, "ordinary generated corpus is incomplete"
+            ):
+                _validate_generated(
+                    output / "generated-manifest.json",
+                    goldens,
+                    require_stress=False,
+                )
+
+    def test_neural_catalog_forbids_checksum_and_requires_calibrated_ranges(self):
+        oracle = load_json(ROOT / "release_corpus" / "neural-oracles.json")
+        _validate_neural_oracles(oracle)
+        weakened = copy.deepcopy(oracle)
+        weakened["cross_gpu_checksum_allowed"] = True
+        with self.assertRaisesRegex(CorpusValidationError, "must be forbidden"):
+            _validate_neural_oracles(weakened)
+        invented = copy.deepcopy(oracle)
+        invented["fixtures"]["fixture-pending"] = {
+            "status": "pending-calibration",
+            "expected_frame_count": 3001,
+            "source_sha256": None,
+            "ranges": {},
+        }
+        with self.assertRaisesRegex(CorpusValidationError, "must not invent"):
+            _validate_neural_oracles(invented)
+        uncalibrated = copy.deepcopy(oracle)
+        uncalibrated["fixtures"]["real-courthouse-streaming-286"].pop(
+            "calibration"
+        )
+        with self.assertRaisesRegex(CorpusValidationError, "calibration evidence"):
+            _validate_neural_oracles(uncalibrated)
+        wrong_pipeline = copy.deepcopy(oracle)
+        wrong_pipeline["fixtures"]["fixture-windowed"] = copy.deepcopy(
+            oracle["fixtures"]["real-courthouse-streaming-286"]
+        )
+        wrong_pipeline["fixtures"]["fixture-windowed"][
+            "expected_frame_count"
+        ] = 3001
+        with self.assertRaisesRegex(
+            CorpusValidationError,
+            "windowed calibration evidence",
+        ):
+            _validate_neural_oracles(wrong_pipeline)
+
+
+@unittest.skipIf(np is None, "Neural oracle requires the pinned Worker Runtime")
+class NeuralOutputOracleTests(unittest.TestCase):
+    FIXTURE_ID = "fixture-ready"
+    SOURCE_SHA = "a" * 64
+
+    def _write_output(self, root: Path) -> None:
+        frames, height, width = 3, 2, 2
+        cameras = np.repeat(
+            np.eye(4, dtype="<f8")[None, :, :], frames, axis=0
+        )
+        cameras[1, 0, 3] = -0.5
+        cameras[2, 0, 3] = -1.0
+        intrinsics = np.repeat(
+            np.array(
+                ((2.0, 0.0, 0.5), (0.0, 2.0, 0.5), (0.0, 0.0, 1.0)),
+                dtype="<f8",
+            )[None, :, :],
+            frames,
+            axis=0,
+        )
+        arrays = {
+            "world_to_camera_opencv.npy": cameras,
+            "model_intrinsics.npy": intrinsics,
+            "depth.npy": np.ascontiguousarray(
+                np.arange(1, frames * height * width + 1, dtype=np.float32)
+                .reshape(frames, height, width),
+                dtype="<f4",
+            ),
+            "confidence.npy": np.ascontiguousarray(
+                np.linspace(0.1, 0.9, frames * height * width, dtype=np.float32)
+                .reshape(frames, height, width),
+                dtype="<f4",
+            ),
+            "source_pts_seconds.npy": np.asarray(
+                (0.0, 0.04, 0.08), dtype="<f8"
+            ),
+            "frame_type.npy": np.asarray((0, 1, 2), dtype="|u1"),
+        }
+        for name, array in arrays.items():
+            np.save(root / name, array, allow_pickle=False)
+        (root / "provenance.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0.0",
+                    "fixture_id": self.FIXTURE_ID,
+                    "source_sha256": self.SOURCE_SHA,
+                    "runtime_id": "b" * 64,
+                    "model_id": "fixture-model",
+                    "model_sha256": "c" * 64,
+                    "profile": "Draft",
+                    "frame_count": frames,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _write_oracle(self, root: Path) -> Path:
+        ranges = {
+            "depth_p05": [1.0, 2.0],
+            "depth_median": [6.0, 7.0],
+            "depth_p95": [11.0, 12.0],
+            "confidence_p05": [0.1, 0.2],
+            "confidence_median": [0.4, 0.6],
+            "confidence_p95": [0.8, 0.9],
+            "camera_path_extent": [0.99, 1.01],
+            "rotation_step_p95_degrees": [0.0, 0.0],
+        }
+        oracle = {
+            "schema_version": "1.0.0",
+            "cross_gpu_checksum_allowed": False,
+            "invariant_tolerances": {
+                "rigid_orthonormal_atol": 1e-6,
+            },
+            "range_metrics": list(ranges),
+            "fixtures": {
+                self.FIXTURE_ID: {
+                    "status": "ready",
+                    "expected_frame_count": 3,
+                    "source_sha256": self.SOURCE_SHA,
+                    "ranges": ranges,
+                }
+            },
+        }
+        path = root / "oracle.json"
+        path.write_text(
+            json.dumps(oracle, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_invariants_and_fixture_ranges_pass_without_output_checksum(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            output.mkdir()
+            self._write_output(output)
+            oracle = self._write_oracle(root)
+            result = validate_neural_output(
+                output, self.FIXTURE_ID, oracle_path=oracle
+            )
+            self.assertEqual(result["frame_count"], 3)
+            self.assertFalse(result["cross_gpu_checksum_used"])
+            self.assertEqual(
+                set(result["metrics"]),
+                {
+                    "depth_p05",
+                    "depth_median",
+                    "depth_p95",
+                    "confidence_p05",
+                    "confidence_median",
+                    "confidence_p95",
+                    "camera_path_extent",
+                    "rotation_step_p95_degrees",
+                },
+            )
+
+    def test_nonfinite_nonrigid_misaligned_and_out_of_range_fail(self):
+        mutations = ("nonfinite", "nonrigid", "timestamps", "range")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                output = root / "output"
+                output.mkdir()
+                self._write_output(output)
+                oracle = self._write_oracle(root)
+                if mutation == "nonfinite":
+                    depth = np.load(output / "depth.npy", allow_pickle=False)
+                    depth[0, 0, 0] = np.nan
+                    np.save(output / "depth.npy", depth, allow_pickle=False)
+                elif mutation == "nonrigid":
+                    cameras = np.load(
+                        output / "world_to_camera_opencv.npy",
+                        allow_pickle=False,
+                    )
+                    cameras[1, 0, 0] = 2.0
+                    np.save(
+                        output / "world_to_camera_opencv.npy",
+                        cameras,
+                        allow_pickle=False,
+                    )
+                elif mutation == "timestamps":
+                    np.save(
+                        output / "source_pts_seconds.npy",
+                        np.asarray((0.0, 0.04, 0.04), dtype="<f8"),
+                        allow_pickle=False,
+                    )
+                else:
+                    document = load_json(oracle)
+                    document["fixtures"][self.FIXTURE_ID]["ranges"][
+                        "camera_path_extent"
+                    ] = [2.0, 3.0]
+                    oracle.write_text(
+                        json.dumps(document, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                with self.assertRaises(CorpusValidationError):
+                    validate_neural_output(
+                        output, self.FIXTURE_ID, oracle_path=oracle
+                    )
+
+    def test_production_pending_fixture_refuses_uncalibrated_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle_path = root / "oracle.json"
+            oracle = load_json(
+                ROOT / "release_corpus" / "neural-oracles.json"
+            )
+            oracle["fixtures"]["fixture-pending"] = {
+                "status": "pending-calibration",
+                "expected_frame_count": 3001,
+                "source_sha256": None,
+                "ranges": None,
+            }
+            oracle_path.write_text(
+                json.dumps(oracle, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                CorpusValidationError, "not calibrated"
+            ):
+                validate_neural_output(
+                    root,
+                    "fixture-pending",
+                    oracle_path=oracle_path,
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()
