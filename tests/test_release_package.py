@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -653,34 +654,37 @@ class ReleasePackageTests(unittest.TestCase):
                 "GITHUB_RUN_ID": "2202",
                 "GITHUB_RUN_ATTEMPT": "1",
             }
-            with mock.patch.dict(os.environ, environment, clear=False):
-                self.assertEqual(
-                    release_package.main(
-                        [
-                            "build",
-                            "--repository-root",
-                            str(repository),
-                            "--output-dir",
-                            str(output),
-                        ]
-                    ),
-                    0,
-                )
-                archive = (
-                    output / "lingbot_map_reconstruction-0.1.0.zip"
-                )
-                self.assertEqual(
-                    release_package.main(
-                        [
-                            "validate",
-                            "--repository-root",
-                            str(repository),
-                            "--archive",
-                            str(archive),
-                        ]
-                    ),
-                    0,
-                )
+            cli_environment = {**os.environ, **environment}
+            cli_environment.pop("PYTHONPATH", None)
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(repository / "scripts" / "release_package.py"),
+                    "build",
+                    "--repository-root",
+                    str(repository),
+                    "--output-dir",
+                    str(output),
+                ],
+                cwd=repository,
+                env=cli_environment,
+                check=True,
+            )
+            archive = output / "lingbot_map_reconstruction-0.1.0.zip"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(repository / "scripts" / "release_package.py"),
+                    "validate",
+                    "--repository-root",
+                    str(repository),
+                    "--archive",
+                    str(archive),
+                ],
+                cwd=repository,
+                env=cli_environment,
+                check=True,
+            )
 
     def test_release_workflow_is_tag_only_and_attests_published_assets(self):
         workflow = (

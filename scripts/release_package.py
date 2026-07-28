@@ -65,6 +65,16 @@ class ReleasePackageError(RuntimeError):
     pass
 
 
+def _localization_validator():
+    try:
+        from scripts import validate_localization
+    except ModuleNotFoundError as exc:
+        if exc.name != "scripts":
+            raise
+        import validate_localization
+    return validate_localization
+
+
 @dataclass(frozen=True)
 class BuildMetadata:
     repository: str
@@ -1309,9 +1319,7 @@ def assemble_release(
     )
 
     try:
-        from scripts import validate_localization
-
-        validate_localization.validate(source)
+        _localization_validator().validate(source)
     except Exception as exc:
         if isinstance(exc, ReleasePackageError):
             raise
@@ -1606,8 +1614,6 @@ def _validate_package_manifest(
 
 def _validate_final_localization(entries: dict[str, bytes]) -> None:
     try:
-        from scripts import validate_localization
-
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             extension = root / "blender_extension"
@@ -1615,7 +1621,7 @@ def _validate_final_localization(entries: dict[str, bytes]) -> None:
                 destination = extension / PurePosixPath(path)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(data)
-            validate_localization.validate(root)
+            _localization_validator().validate(root)
     except Exception as exc:
         raise ReleasePackageError(
             "final ZIP localization or offline manual gate failed"
