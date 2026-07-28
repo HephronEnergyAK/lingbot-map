@@ -342,6 +342,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "av" },
+    { name = "hf-xet" },
     { name = "lingbot-map" },
     { name = "lingbot-map-worker" },
     { name = "nvidia-ml-py" },
@@ -352,6 +353,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "av", specifier = "==17.1.0" },
+    { name = "hf-xet", specifier = "==1.5.2" },
     { name = "lingbot-map", path = "wheels/lingbot_map-0.1.0-py3-none-any.whl" },
     { name = "lingbot-map-worker", path = "wheels/lingbot_map_worker-0.1.0-py3-none-any.whl" },
     { name = "nvidia-ml-py", specifier = "==13.610.43" },

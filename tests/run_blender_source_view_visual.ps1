@@ -6,7 +6,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$WorkerPython,
 
-    [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot)
+    [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
+
+    [string]$BlenderUserExtensions
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,10 +50,22 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $previousConfig = $env:BLENDER_USER_CONFIG
+$previousExtensions = $env:BLENDER_USER_EXTENSIONS
+$previousInstalledGate = $env:LINGBOT_MAP_INSTALLED_EXTENSION
 $previousProfileGate = $env:LINGBOT_MAP_VISUAL_ISOLATED_PROFILE
 $previousFixture = $env:LINGBOT_MAP_SOURCE_VIEW_FIXTURE
 try {
     $env:BLENDER_USER_CONFIG = $profile
+    if ($BlenderUserExtensions) {
+        $extensions = [System.IO.Path]::GetFullPath($BlenderUserExtensions)
+        if (-not (Test-Path -LiteralPath $extensions -PathType Container)) {
+            throw "Installed extension root is absent: $extensions"
+        }
+        $env:BLENDER_USER_EXTENSIONS = $extensions
+        $env:LINGBOT_MAP_INSTALLED_EXTENSION = "1"
+    } else {
+        $env:LINGBOT_MAP_INSTALLED_EXTENSION = $null
+    }
     $env:LINGBOT_MAP_VISUAL_ISOLATED_PROFILE = "1"
     $env:LINGBOT_MAP_SOURCE_VIEW_FIXTURE = $fixture
     & $blender --background --factory-startup --python (
@@ -72,6 +86,8 @@ try {
     }
 } finally {
     $env:BLENDER_USER_CONFIG = $previousConfig
+    $env:BLENDER_USER_EXTENSIONS = $previousExtensions
+    $env:LINGBOT_MAP_INSTALLED_EXTENSION = $previousInstalledGate
     $env:LINGBOT_MAP_VISUAL_ISOLATED_PROFILE = $previousProfileGate
     $env:LINGBOT_MAP_SOURCE_VIEW_FIXTURE = $previousFixture
 }
@@ -105,4 +121,6 @@ if (
         $marker.coverage_max_error_display_pixels
     )
     TemporaryGuideDatablocks = $marker.temporary_guide_datablocks
+    InstalledExtension = $marker.installed_extension
+    ExtensionModulePath = $marker.extension_module_path
 } | ConvertTo-Json -Compress

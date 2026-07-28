@@ -12,19 +12,21 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXTENSION = ROOT / "blender_extension"
 PACKAGE = "lingbot_gpu_capability_integration"
 TERMINAL = {"succeeded", "cancelled", "blocked", "failed"}
 
 
-def _load_modules():
+def _load_modules(extension: Path):
     package = ModuleType(PACKAGE)
-    package.__path__ = [str(EXTENSION)]
+    package.__path__ = [str(extension)]
     sys.modules[PACKAGE] = package
     loaded = {}
     for short_name in ("runtime_setup", "model_store", "gpu_capability"):
         name = f"{PACKAGE}.{short_name}"
-        spec = importlib.util.spec_from_file_location(name, EXTENSION / f"{short_name}.py")
+        spec = importlib.util.spec_from_file_location(
+            name,
+            extension / f"{short_name}.py",
+        )
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         assert spec.loader is not None
@@ -38,8 +40,22 @@ def main() -> int:
     parser.add_argument("--managed-root", type=Path, required=True)
     parser.add_argument("--gpu-uuid", default="")
     parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument(
+        "--extension-root",
+        type=Path,
+        default=ROOT / "blender_extension",
+    )
+    parser.add_argument("--require-outside-checkout", action="store_true")
     arguments = parser.parse_args()
-    capability = _load_modules()
+    extension_root = arguments.extension_root.resolve()
+    if arguments.require_outside_checkout:
+        try:
+            extension_root.relative_to(ROOT)
+        except ValueError:
+            pass
+        else:
+            parser.error("installed Extension root must be outside the checkout")
+    capability = _load_modules(extension_root)
     devices = capability.discover_physical_gpus(arguments.managed_root)
     gpu_uuid = capability.select_gpu_uuid(devices, arguments.gpu_uuid)
     controller = capability.CapabilityController()
@@ -71,6 +87,7 @@ def main() -> int:
         "total": snapshot.total,
         "devices": [device.__dict__ for device in devices],
         "results": list(snapshot.results),
+        "extension_root": str(extension_root),
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     if snapshot.state != "succeeded":

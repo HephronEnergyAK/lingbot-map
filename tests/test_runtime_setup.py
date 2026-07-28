@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import tomllib
 import unittest
 from unittest import mock
 import zipfile
@@ -155,6 +156,17 @@ class RuntimeIdentityTests(unittest.TestCase):
         packages = {item["name"]: item["version"] for item in inventory["packages"]}
         self.assertEqual(packages["onnxruntime"], "1.23.2")
         self.assertNotIn("onnxruntime-gpu", packages)
+        project = tomllib.loads(
+            (bundle_root / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        self.assertIn("hf-xet==1.5.2", project["project"]["dependencies"])
+        locked = tomllib.loads(lock)
+        runtime_project = next(
+            package
+            for package in locked["package"]
+            if package.get("source") == {"virtual": "."}
+        )
+        self.assertIn({"name": "hf-xet"}, runtime_project["dependencies"])
         catalog = json.loads((bundle_root / "schemas" / "catalog.json").read_text(encoding="utf-8"))
         self.assertTrue(catalog["contracts"])
         for contract in catalog["contracts"]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import os
@@ -387,12 +388,19 @@ def _capture_case():
 def _setup():
     index = json.loads((FIXTURE / "index.json").read_text(encoding="utf-8"))
     OUTPUT.mkdir(exist_ok=True)
-    package_name = "lingbot_map_issue15_visual"
-    package = types.ModuleType(package_name)
-    package.__path__ = [str(ROOT / "blender_extension")]
-    sys.modules[package_name] = package
-    importer = __import__(package_name + ".result_import", fromlist=["*"])
-    source_view = __import__(package_name + ".source_view", fromlist=["*"])
+    installed = os.environ.get("LINGBOT_MAP_INSTALLED_EXTENSION") == "1"
+    if installed:
+        package_name = "bl_ext.user_default.lingbot_map_reconstruction"
+    else:
+        package_name = "lingbot_map_issue15_visual"
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(ROOT / "blender_extension")]
+        sys.modules[package_name] = package
+    importer = importlib.import_module(package_name + ".result_import")
+    source_view = importlib.import_module(package_name + ".source_view")
+    module_path = Path(importer.__file__).resolve()
+    if installed:
+        assert not module_path.is_relative_to(ROOT.resolve()), module_path
     scene = bpy.context.scene
     scene["lingbot_map_scene_uuid"] = index["scene_uuid"]
     bpy.ops.wm.save_as_mainfile(filepath=index["blend"])
@@ -445,6 +453,8 @@ def _setup():
             "index": index,
             "importer": importer,
             "source_view": source_view,
+            "installed_extension": installed,
+            "extension_module_path": str(module_path),
             "scene": scene,
             "window": window,
             "area": area,
@@ -474,6 +484,8 @@ def _finish():
         "background_max_error_display_pixels": STATE["background_max_error"],
         "coverage_max_error_display_pixels": STATE["coverage_max_error"],
         "temporary_guide_datablocks": 0,
+        "installed_extension": STATE["installed_extension"],
+        "extension_module_path": STATE["extension_module_path"],
         "results": STATE["results"],
     }
     (FIXTURE / "visual-marker.json").write_text(

@@ -2,36 +2,48 @@
 
 from __future__ import annotations
 
+import importlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
 import tempfile
 import time
+import types
 
 import bpy
 
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from blender_extension.job_lifecycle import (  # noqa: E402
-    JobController,
-    SCENE_UUID_PROPERTY,
-)
-from blender_extension.project_lifecycle import ProjectLifecycle  # noqa: E402
-from blender_extension.result_import import (  # noqa: E402
-    import_result,
-    result_reference_status,
-)
-from blender_extension.results import discover_ready_results  # noqa: E402
-
-
 SCENE_UUID = "12345678-1234-4321-8765-123456789abc"
 
 
-def _wait(controller: JobController, timeout: float = 30.0):
+def _load_extension_modules():
+    installed = os.environ.get("LINGBOT_MAP_INSTALLED_EXTENSION") == "1"
+    if installed:
+        package_name = "bl_ext.user_default.lingbot_map_reconstruction"
+    else:
+        package_name = "lingbot_map_issue17_source"
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(ROOT / "blender_extension")]
+        sys.modules[package_name] = package
+    modules = tuple(
+        importlib.import_module(f"{package_name}.{name}")
+        for name in (
+            "job_lifecycle",
+            "project_lifecycle",
+            "result_import",
+            "results",
+        )
+    )
+    module_path = Path(modules[2].__file__).resolve()
+    if installed:
+        assert not module_path.is_relative_to(ROOT.resolve()), module_path
+    return (*modules, installed, module_path)
+
+
+def _wait(controller, timeout: float = 30.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         snapshot = controller.snapshot()
@@ -51,6 +63,14 @@ def _wait(controller: JobController, timeout: float = 30.0):
 
 
 def main() -> int:
+    (
+        jobs,
+        project_lifecycle,
+        result_import,
+        results,
+        installed,
+        module_path,
+    ) = _load_extension_modules()
     arguments = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     if len(arguments) != 1:
         raise SystemExit(
@@ -64,11 +84,11 @@ def main() -> int:
     try:
         blend = workspace / "shared.blend"
         scene = bpy.context.scene
-        scene[SCENE_UUID_PROPERTY] = SCENE_UUID
+        scene[jobs.SCENE_UUID_PROPERTY] = SCENE_UUID
         bpy.ops.wm.save_as_mainfile(filepath=str(blend))
         source = workspace / "capture.mp4"
         source.write_bytes(b"blender lifecycle fixture")
-        controller = JobController()
+        controller = jobs.JobController()
         job_id = controller.launch_result_fixture(
             managed_root=managed_root,
             blend_path=blend,
@@ -82,10 +102,10 @@ def main() -> int:
             initial_voxel_edge_length=0.01,
         )
         _wait(controller)
-        ready = discover_ready_results(blend, scene_uuid=SCENE_UUID)
+        ready = results.discover_ready_results(blend, scene_uuid=SCENE_UUID)
         assert len(ready) == 1
         result = ready[0]
-        imported = import_result(
+        imported = result_import.import_result(
             result.directory, scene, context=bpy.context
         )
         collection = imported.collection
@@ -101,13 +121,13 @@ def main() -> int:
         before_object_pointer = shared_object.as_pointer()
         before_data_pointer = shared_data.as_pointer()
 
-        lifecycle = ProjectLifecycle(blend)
+        lifecycle = project_lifecycle.ProjectLifecycle(blend)
         trashed = lifecycle.execute(
             lifecycle.plan(
                 "trash_result", [result.directory.name]
             )
         ).destinations[0]
-        status_while_trashed, _path = result_reference_status(
+        status_while_trashed, _path = result_import.result_reference_status(
             collection, str(blend)
         )
         assert status_while_trashed == "unavailable"
@@ -121,7 +141,7 @@ def main() -> int:
         lifecycle.execute(
             lifecycle.plan("restore", [trashed.name])
         )
-        restored_status, restored_path = result_reference_status(
+        restored_status, restored_path = result_import.result_reference_status(
             collection, str(blend)
         )
         assert restored_status == "available"
@@ -136,6 +156,8 @@ def main() -> int:
                     "collection_usable_while_trashed": True,
                     "reference_unavailable_while_trashed": True,
                     "reference_available_after_restore": True,
+                    "installed_extension": installed,
+                    "extension_module_path": str(module_path),
                 },
                 sort_keys=True,
             )

@@ -5,6 +5,8 @@ from __future__ import annotations
 import addon_utils
 import importlib
 import json
+import os
+from pathlib import Path
 import sys
 
 import bpy
@@ -44,12 +46,37 @@ def project_lifecycle_operators_registered():
     return True
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def main():
     assert bpy.app.version[:2] == (5, 2), bpy.app.version
     loaded_default, loaded_state = addon_utils.check(MODULE_NAME)
     assert loaded_state, (loaded_default, loaded_state)
 
     extension = importlib.import_module(MODULE_NAME)
+    module_file = Path(extension.__file__).resolve()
+    expected_root = os.environ.get("LINGBOT_MAP_EXPECTED_EXTENSION_ROOT")
+    if expected_root:
+        assert _is_within(module_file, Path(expected_root).resolve()), (
+            module_file,
+            expected_root,
+        )
+    forbidden_root = os.environ.get("LINGBOT_MAP_FORBIDDEN_CHECKOUT_ROOT")
+    checkout_on_sys_path = False
+    if forbidden_root:
+        checkout = Path(forbidden_root).resolve()
+        checkout_on_sys_path = any(
+            _is_within(Path(entry or Path.cwd()).resolve(), checkout)
+            for entry in sys.path
+        )
+        assert not _is_within(module_file, checkout), module_file
+        assert not checkout_on_sys_path, sys.path
     decision = extension.get_host_decision()
     assert decision is not None
     assert panels_registered()
@@ -66,6 +93,11 @@ def main():
     assert sky_property.type == "BOOLEAN", sky_property.type
     assert sky_property.default is False, sky_property.default
     assert "not Dynamic Content removal" in sky_property.description
+    sky_mask_contract = {
+        "type": sky_property.type,
+        "default": sky_property.default,
+        "dynamic_content_claim": False,
+    }
     assert not any(
         name == "lingbot_map"
         or name.startswith("lingbot_map.")
@@ -96,6 +128,8 @@ def main():
             {
                 "blender_version": bpy.app.version_string,
                 "module": MODULE_NAME,
+                "module_file": str(module_file),
+                "checkout_on_sys_path": checkout_on_sys_path,
                 "host_supported": extension.get_host_decision().supported,
                 "host_code": extension.get_host_decision().code,
                 "panels": list(PANEL_TYPES),
@@ -103,11 +137,7 @@ def main():
                     PROJECT_LIFECYCLE_OPERATORS
                 ),
                 "preferences": ["runtime_root", "gpu_uuid", "offline_setup"],
-                "sky_mask_property": {
-                    "type": sky_property.type,
-                    "default": sky_property.default,
-                    "dynamic_content_claim": False,
-                },
+                "sky_mask_property": sky_mask_contract,
                 "reload": "passed",
                 "disable_enable": "passed",
                 "worker_or_model_imported": False,

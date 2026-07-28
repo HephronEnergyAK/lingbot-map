@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import os
@@ -17,7 +18,12 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE_ROOT = Path(r"C:\tmp\lingbot-map-source-view15")
+FIXTURE_ROOT = Path(
+    os.environ.get(
+        "LINGBOT_MAP_SOURCE_VIEW_FIXTURE",
+        r"C:\tmp\lingbot-map-source-view15",
+    )
+)
 INDEX = json.loads((FIXTURE_ROOT / "index.json").read_text(encoding="utf-8"))
 TRANSFORMS = tuple(INDEX["results"])
 TIMELINE_START = int(INDEX["timeline_start"])
@@ -69,12 +75,19 @@ def _reference_transform(image, transform):
 
 def main() -> None:
     assert bpy.app.version[:2] == (5, 2), bpy.app.version
-    package_name = "lingbot_map_issue15_source"
-    package = types.ModuleType(package_name)
-    package.__path__ = [str(ROOT / "blender_extension")]
-    sys.modules[package_name] = package
-    importer = __import__(package_name + ".result_import", fromlist=["*"])
-    source_view = __import__(package_name + ".source_view", fromlist=["*"])
+    installed = os.environ.get("LINGBOT_MAP_INSTALLED_EXTENSION") == "1"
+    if installed:
+        package_name = "bl_ext.user_default.lingbot_map_reconstruction"
+    else:
+        package_name = "lingbot_map_issue15_source"
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(ROOT / "blender_extension")]
+        sys.modules[package_name] = package
+    importer = importlib.import_module(package_name + ".result_import")
+    source_view = importlib.import_module(package_name + ".source_view")
+    module_path = Path(importer.__file__).resolve()
+    if installed:
+        assert not module_path.is_relative_to(ROOT.resolve()), module_path
 
     scene = bpy.context.scene
     scene["lingbot_map_scene_uuid"] = INDEX["scene_uuid"]
@@ -430,6 +443,8 @@ def main() -> None:
         "fps_preserved": True,
         "scene_camera_preserved": True,
         "cancellation_phases": list(importer.IMPORT_PHASES),
+        "installed_extension": installed,
+        "extension_module_path": str(module_path),
     }
     (FIXTURE_ROOT / "blender-marker.json").write_text(
         json.dumps(marker, sort_keys=True), encoding="utf-8"

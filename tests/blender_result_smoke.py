@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib
 import json
 import os
-import hashlib
 from pathlib import Path
 import shutil
 import sys
@@ -23,8 +24,32 @@ MANAGED_ROOT = Path(
         r"C:\tmp\lingbot-map-runtime-issue4-final",
     )
 )
-PROJECT_DIR = Path(r"C:\tmp\lingbot-map-blender-result") / f"run-{os.getpid()}"
+PROJECT_DIR = Path(
+    os.environ.get(
+        "LINGBOT_MAP_TEST_OUTPUT_ROOT",
+        r"C:\tmp\lingbot-map-blender-result",
+    )
+) / f"run-{os.getpid()}"
 SCENE_UUID = "12345678-1234-4321-8765-123456789abc"
+
+
+def _load_extension_modules():
+    installed = os.environ.get("LINGBOT_MAP_INSTALLED_EXTENSION") == "1"
+    if installed:
+        package_name = "bl_ext.user_default.lingbot_map_reconstruction"
+    else:
+        package_name = "lingbot_map_issue14_source"
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(ROOT / "blender_extension")]
+        sys.modules[package_name] = package
+    modules = tuple(
+        importlib.import_module(f"{package_name}.{name}")
+        for name in ("job_lifecycle", "results", "result_import")
+    )
+    module_path = Path(modules[-1].__file__).resolve()
+    if installed:
+        assert not module_path.is_relative_to(ROOT.resolve()), module_path
+    return (*modules, installed, module_path)
 
 
 def main() -> None:
@@ -50,13 +75,7 @@ def main() -> None:
     scene.camera = unrelated_camera
     unrelated_collection.objects.link(unrelated_camera)
 
-    package_name = "lingbot_map_issue14_source"
-    package = types.ModuleType(package_name)
-    package.__path__ = [str(ROOT / "blender_extension")]
-    sys.modules[package_name] = package
-    jobs = __import__(package_name + ".job_lifecycle", fromlist=["*"])
-    results = __import__(package_name + ".results", fromlist=["*"])
-    importer = __import__(package_name + ".result_import", fromlist=["*"])
+    jobs, results, importer, installed, module_path = _load_extension_modules()
     controller = jobs.JobController()
     job_id = controller.launch_result_fixture(
         managed_root=MANAGED_ROOT,
@@ -449,6 +468,8 @@ def main() -> None:
         "unrelated_state_preserved": True,
         "scene_fps": scene.render.fps,
         "scene_frame": scene.frame_current,
+        "installed_extension": installed,
+        "extension_module_path": str(module_path),
     }
     (PROJECT_DIR / "marker.json").write_text(
         json.dumps(marker, sort_keys=True), encoding="utf-8"
